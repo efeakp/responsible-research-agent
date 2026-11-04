@@ -124,6 +124,24 @@ code, .mono { font-family: var(--mono); font-size: 12.5px; }
 .num { font-variant-numeric: tabular-nums; }
 .empty { padding: 32px; text-align: center; color: var(--ink-2); background: var(--sheet); border-radius: 10px; }
 
+/* ---------- conversion preview ---------- */
+
+.meta.source-line { display: block; margin-top: 4px; }
+
+.intake.with-preview { grid-template-columns: minmax(0, 1fr) 300px; }
+.preview { background: var(--sheet); border-radius: 10px; padding: 22px 24px; display: grid; gap: 12px; }
+.preview .small { margin: 2px 0 0; }
+.tally.compact { margin: 4px 0 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.tally.compact div { margin-right: 0; padding-right: 12px; padding-left: 12px; }
+.tally.compact div:first-child { padding-left: 0; }
+.tally.compact b { font-size: 19px; }
+.conv-warnings { margin: 0; padding: 10px 14px 10px 30px; background: var(--ochre-wash); border-left: 3px solid var(--ochre); border-radius: 0 6px 6px 0; font-size: 14px; display: grid; gap: 4px; }
+.md-edit {
+  width: 100%; min-height: 420px; resize: vertical; padding: 14px 16px; border: 1px solid var(--rule);
+  border-radius: 8px; background: var(--paper); font: 13px/1.6 var(--mono); tab-size: 2;
+}
+.preview-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+
 /* ---------- status ---------- */
 
 .status { display: inline-flex; align-items: center; gap: 7px; font-size: 13.5px; font-weight: 500; }
@@ -240,11 +258,12 @@ code, .mono { font-family: var(--mono); font-size: 12.5px; }
 /* ---------- small screens ---------- */
 
 @media (max-width: 900px) {
-  .intake, .workspace { grid-template-columns: 1fr; }
+  .intake, .intake.with-preview, .workspace { grid-template-columns: 1fr; }
   .signoff { position: static; }
 }
 @media (max-width: 640px) {
   .wordmark span { display: none; }
+  .tally.compact div, .tally.compact div:first-child { padding-left: 0; }
   .tally { display: grid; grid-template-columns: 1fr 1fr; }
   .tally div { margin-right: 0; padding: 10px 12px 10px 0; border-right: 0; border-bottom: 1px solid var(--rule-soft); }
   .tally div:nth-last-child(-n+2) { border-bottom: 0; }

@@ -57,6 +57,13 @@ export default function RunPage({ id }: { id: string }) {
             <span>Started {when(run.created_at)}</span>
             <span>{run.mode === "ollama" ? `Claims checked by ${run.model}` : "Claims checked without a model"}</span>
           </div>
+          {run.source && (
+            <p className="meta source-line">
+              Converted from <a href={api.sourceUrl(run.run_id)}>{run.source.filename}</a> with {run.source.extractor}
+              {run.source.edited ? ", then corrected by hand before checking" : ""}.{" "}
+              <a href={api.manuscriptUrl(run.run_id)} target="_blank" rel="noreferrer">See the text that was checked</a>
+            </p>
+          )}
         </div>
         {(run.status === "awaiting_human_signoff" || isSignedOff(run.status)) && (
           <a className="btn ghost" href={api.reportUrl(run.run_id)} target="_blank" rel="noreferrer">
@@ -525,6 +532,8 @@ function SignOff({ run, flagged, draft, onSigned }: { run: RunDetail; flagged: s
 function summarise(e: AuditEvent): string {
   const d = e.data as Record<string, any>;
   switch (e.event) {
+    case "source_converted":
+      return `${d.filename} converted with ${d.extractor}${d.edited_by_reviewer ? ", edited before checking" : ""}. Original ${String(d.original_sha256).slice(0, 12)}…`;
     case "run_started":
       return `Mode ${d.mode}${d.model?.model ? `, model ${d.model.model}` : ""}${d.model?.digest ? ` (${String(d.model.digest).slice(0, 19)}…)` : ""}`;
     case "parsed":

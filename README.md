@@ -22,12 +22,17 @@ Every database request, model call and verdict goes into a hash-chained audit lo
 # 1. Ollama: https://ollama.com/download, then
 ollama pull llama3.1:8b
 
-# 2. This package
-cd rra
+# 2. This package (needs Python 3.10 or newer: check with `python --version`)
+cd responsible-research-agent        # the folder containing pyproject.toml
 python -m venv .venv
-.venv\Scripts\activate          # Windows  (macOS/Linux: source .venv/bin/activate)
+source .venv/Scripts/activate        # Windows Git Bash
+# .venv\Scripts\activate            # Windows Command Prompt / PowerShell
+# source .venv/bin/activate          # macOS / Linux
+python -m pip install --upgrade pip  # editable installs need pip 21.3 or newer
 pip install -e ".[test]"
 ```
+
+With conda instead of venv: `conda create -n rra python=3.12 -y`, then `conda activate rra`, then the same pip steps.
 
 It has three parts:
 
@@ -51,6 +56,8 @@ npm install
 npm run dev
 ```
 
+You can upload a PDF, Word (.docx) or HTML article as well as Markdown. These need the converter installed on the API side: run `pip install -e ".[convert]"`. The app converts the file and shows you the text that will be checked, with counts of references, identifiers and citations, plus any warnings. You can correct the text there before starting. The original file is kept with the run. The first entry in the audit trail records the original's fingerprint, the converter used, and whether you edited the text.
+
 In development, Vite forwards `/api` to port 8000. To deploy the frontend separately, build it with `VITE_API_URL=https://your-api-host npm run build`. Then add that frontend's origin to `cors_origins` in `create_app`.
 
 **Try the web app with no network and no Ollama:** run `python examples/serve_demo.py` instead of `rra serve`, then upload `examples/sample_manuscript.md`. The demo uses mocked databases and a scripted stand-in for the model.
@@ -60,12 +67,16 @@ In development, Vite forwards `/api` to port 8000. To deploy the frontend separa
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/health` | Whether Ollama is reachable, and which models are pulled |
+| POST | `/api/conversions` | Convert a PDF, Word or HTML file (`file`) for preview. Returns the Markdown, counts and warnings |
+| POST | `/api/inspect` | `{markdown}`. What the verifier will see: counts and missing citations |
 | GET | `/api/runs` | All checks, newest first |
-| POST | `/api/runs` | Upload a manuscript (`file`, `mode`, `model`). Queues a run; returns 202 |
+| POST | `/api/runs` | Queue a run from a `.md`/`.txt` `file`, or from a `conversion_id` plus the (edited) `markdown`. Also takes `mode` and `model`. Returns 202 |
 | GET | `/api/runs/{id}` | Results, pending items, reviewer verdicts, sign-off |
 | POST | `/api/runs/{id}/review` | `{reviewer, decision, note, resolutions[]}`. Resumes the graph from its review pause |
 | GET | `/api/runs/{id}/audit` | Audit events and whether the hash chain is intact |
 | GET | `/api/runs/{id}/report` | The static HTML report |
+| GET | `/api/runs/{id}/source` | The original PDF, Word or HTML file, if the run came from a conversion |
+| GET | `/api/runs/{id}/manuscript` | The exact Markdown that was checked |
 
 Runs are processed one at a time, which respects arXiv's one-connection rule. The server binds to `127.0.0.1` by default. **It has no login.** Don't expose it on a network until authentication is added.
 
@@ -73,8 +84,24 @@ Runs are processed one at a time, which respects arXiv's one-connection rule. Th
 
 ```bash
 python examples/demo_offline.py --signoff   # mocked APIs and a scripted stand-in model
-pytest -q                                   # 22 tests (engine + API)
+pytest -q                                   # 34 tests (engine, API, converter)
 ```
+
+## Converting articles to Markdown
+
+The verifier reads Markdown. To convert a PDF, Word (.docx) or HTML article:
+
+```bash
+pip install -e ".[convert]"          # once
+rra convert paper.pdf                # writes paper.md
+rra convert paper.docx -o paper.md
+```
+
+It re-joins hyphenated words and wrapped lines, removes page numbers, and turns superscript citation numbers into `[n]`. It also finds the reference list and splits it into one numbered entry per line. If the original used Word's automatic numbering, which doesn't survive extraction, it numbers the entries itself. Sections after the references, such as acknowledgements or an appendix, are moved before them.
+
+It then reports what the verifier will see: how many references were found, how many have a DOI, arXiv ID or PMID, how many cited sentences there are, and any citations with no matching reference. Anything it had to guess is printed as a warning. **Skim the output before verifying it.** PDF extraction is never perfect, and superscript citations in PDFs are the most common thing to go missing.
+
+For better PDF layout handling, also run `pip install pymupdf4llm`; it's used automatically when installed. It is AGPL-licensed, so it's left out of the default install.
 
 ## Command line
 
@@ -144,6 +171,7 @@ rra/audit.py      hash-chained log
 rra/http.py       cached, logged HTTP
 rra/report.py     HTML report
 rra/api.py        FastAPI backend
-rra/cli.py        verify | status | signoff | audit-check | graph | serve
+rra/convert.py    PDF / Word / HTML → verifier-ready Markdown
+rra/cli.py        verify | status | signoff | audit-check | graph | serve | convert
 frontend/src/     React app: RunsPage (upload + list), RunPage (review sheet, sign-off, audit trail)
 ```

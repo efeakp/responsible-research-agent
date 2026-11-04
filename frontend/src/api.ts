@@ -22,6 +22,32 @@ export interface Counts {
   pairs_needing_attention: number;
 }
 
+export interface Source {
+  filename: string;
+  extractor: string;
+  warnings: string[];
+  edited: boolean;
+  original_file: string;
+}
+
+export interface Summary {
+  references: number;
+  with_identifier: number;
+  claims: number;
+  missing_citations: string[];
+  uncited_references: string[];
+  has_reference_heading: boolean;
+}
+
+export interface ConversionOut {
+  conversion_id: string;
+  filename: string;
+  extractor: string;
+  warnings: string[];
+  markdown: string;
+  summary: Summary;
+}
+
 export interface RunSummary {
   run_id: string;
   filename: string;
@@ -31,6 +57,7 @@ export interface RunSummary {
   status: RunStatus;
   error: string | null;
   counts: Counts;
+  source?: Source;
 }
 
 export interface Reference {
@@ -133,7 +160,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
     res = await fetch(`${BASE}${path}`, init);
-  } catch {
+  } catch (e) {
+    if ((e as Error).name === "AbortError") throw e;
     throw new Error("Can't reach the API server. Start it with `rra serve`.");
   }
   if (!res.ok) {
@@ -166,6 +194,28 @@ export const api = {
     if (model) form.append("model", model);
     return request<{ run_id: string }>("/api/runs", { method: "POST", body: form });
   },
+  convert: (file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return request<ConversionOut>("/api/conversions", { method: "POST", body: form });
+  },
+  inspect: (markdown: string, signal?: AbortSignal) =>
+    request<Summary>("/api/inspect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ markdown }),
+      signal,
+    }),
+  createRunFromConversion: (conversionId: string, markdown: string, mode: "ollama" | "heuristic", model?: string) => {
+    const form = new FormData();
+    form.append("conversion_id", conversionId);
+    form.append("markdown", markdown);
+    form.append("mode", mode);
+    if (model) form.append("model", model);
+    return request<{ run_id: string }>("/api/runs", { method: "POST", body: form });
+  },
+  sourceUrl: (id: string) => `${BASE}/api/runs/${encodeURIComponent(id)}/source`,
+  manuscriptUrl: (id: string) => `${BASE}/api/runs/${encodeURIComponent(id)}/manuscript`,
   review: (id: string, body: ReviewIn) =>
     request<RunDetail>(`/api/runs/${encodeURIComponent(id)}/review`, {
       method: "POST",

@@ -87,6 +87,42 @@ def cmd_graph(a: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_convert(a: argparse.Namespace) -> int:
+    from .convert import ConversionUnavailable, convert_file, inspect_markdown
+    src = Path(a.input)
+    out = Path(a.output) if a.output else src.with_suffix(".md")
+    if out.resolve() == src.resolve():
+        out = src.with_name(src.stem + ".converted.md")
+    if out.exists() and not a.force:
+        print(f"Error: {out} already exists. Use --force to overwrite, or -o to choose another name.",
+              file=sys.stderr)
+        return 2
+    if not src.exists():
+        print(f"Error: {src} not found.", file=sys.stderr)
+        return 2
+    try:
+        conv = convert_file(src)
+    except ConversionUnavailable as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
+    except Exception as e:
+        print(f"Error: couldn't read {src.name} ({type(e).__name__}: {e}). "
+              "A scanned PDF has no text layer to extract.", file=sys.stderr)
+        return 2
+    out.write_text(conv.markdown, encoding="utf-8")
+    info = inspect_markdown(conv.markdown)
+    missing = info["missing_citations"]
+    print(f"Wrote {out}  (extracted with {conv.extractor})")
+    print(f"  references: {info['references']}  with DOI/arXiv/PMID: {info['with_identifier']}")
+    print(f"  cited sentences: {info['claims']}")
+    if missing:
+        print(f"  cited but not in reference list: {missing[:15]}{' …' if len(missing) > 15 else ''}")
+    for w in conv.warnings:
+        print(f"  warning: {w}")
+    print("Skim the file before verifying it: extraction from PDFs is never perfect.")
+    return 0
+
+
 def cmd_serve(a: argparse.Namespace) -> int:
     import os
     import uvicorn
@@ -133,6 +169,12 @@ def main(argv: list[str] | None = None) -> int:
     gr = sub.add_parser("graph", help="Print the workflow as a Mermaid diagram")
     gr.add_argument("--out", default="runs")
     gr.set_defaults(func=cmd_graph)
+
+    cv = sub.add_parser("convert", help="Convert a PDF, Word or HTML article to verifier-ready Markdown")
+    cv.add_argument("input", help=".pdf, .docx, .html or .txt file")
+    cv.add_argument("-o", "--output", help="Output .md file (default: same name, .md)")
+    cv.add_argument("--force", action="store_true", help="Overwrite the output file if it exists")
+    cv.set_defaults(func=cmd_convert)
 
     sv = sub.add_parser("serve", help="Start the API server for the web app")
     sv.add_argument("--host", default="127.0.0.1")

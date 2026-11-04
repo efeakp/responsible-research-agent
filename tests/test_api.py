@@ -81,3 +81,47 @@ def test_rejects_bad_uploads(client):
 def test_unknown_run_404(client):
     assert client.get("/api/runs/nope-123456").status_code == 404
     assert client.get("/api/runs/..%2F..%2Fetc").status_code == 404
+
+
+# ---------- conversion flow ----------
+
+def test_convert_preview_edit_and_check(client, tmp_path):
+    pytest.importorskip("docx")
+    from test_convert import make_docx
+    src = tmp_path / "paper.docx"
+    make_docx(src)
+    r = client.post("/api/conversions", files={"file": ("paper.docx", src.read_bytes(),
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document")})
+    assert r.status_code == 201, r.text
+    conv = r.json()
+    assert conv["summary"]["references"] == 3 and conv["summary"]["claims"] >= 3
+    assert any("numbered 3 entries" in w for w in conv["warnings"])
+
+    # reviewer edits the text before checking; counts refresh through /api/inspect
+    edited = conv["markdown"].replace("updated in 2021[3].", "updated in 2021[3]. Unsourced claim [9].")
+    info = client.post("/api/inspect", json={"markdown": edited}).json()
+    assert info["missing_citations"] == ["9"]
+
+    run_id = client.post("/api/runs", data={"conversion_id": conv["conversion_id"],
+                                            "markdown": edited, "mode": "ollama"}).json()["run_id"]
+    run = wait(client, run_id)
+    assert run["status"] == "awaiting_human_signoff"
+    assert run["filename"] == "paper.docx" and run["source"]["edited"] is True
+    assert run["unresolved_citations"] == ["9"]
+
+    audit = client.get(f"/api/runs/{run_id}/audit").json()
+    assert audit["ok"]
+    first = audit["events"][0]
+    assert first["event"] == "source_converted" and first["data"]["edited_by_reviewer"] is True
+    assert first["data"]["original_sha256"] == conv["original_sha256"]
+
+    assert client.get(f"/api/runs/{run_id}/source").content == src.read_bytes()
+    assert "Unsourced claim [9]" in client.get(f"/api/runs/{run_id}/manuscript").text
+
+
+def test_conversion_rejects_unsupported_and_corrupt(client):
+    assert client.post("/api/conversions", files={"file": ("a.exe", b"MZ", "application/octet-stream")}).status_code == 415
+    r = client.post("/api/conversions", files={"file": ("broken.pdf", b"not a pdf", "application/pdf")})
+    assert r.status_code == 422 and "Couldn't read" in r.json()["detail"]
+    assert client.post("/api/runs", data={"conversion_id": "nope-000000", "mode": "heuristic"}).status_code == 404
+    assert client.post("/api/runs", data={"mode": "heuristic"}).status_code == 422

@@ -2,11 +2,15 @@
 
     GET  /api/health                 Ollama reachability and pulled models
     GET  /api/runs                   all runs, newest first
-    POST /api/runs                   upload a manuscript and queue a run   (202)
+    POST /api/conversions            convert a PDF / Word / HTML article for preview
+    POST /api/inspect                what the verifier will see in some Markdown
+    POST /api/runs                   queue a run from a .md/.txt file or a conversion (202)
     GET  /api/runs/{id}              full results, review state, pending items
     POST /api/runs/{id}/review       record the human decision; resumes the graph
     GET  /api/runs/{id}/audit        audit events and chain integrity
     GET  /api/runs/{id}/report       the static HTML report
+    GET  /api/runs/{id}/source       the original PDF / Word / HTML file, if converted
+    GET  /api/runs/{id}/manuscript   the exact Markdown that was checked
 
 Runs execute one at a time on a background worker: a live run takes minutes
 (local model, 3-second arXiv spacing), and arXiv asks for one connection at a time.
@@ -18,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import threading
 from contextlib import asynccontextmanager
 from concurrent.futures import ThreadPoolExecutor
@@ -31,19 +36,26 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from . import __version__
-from .audit import utcnow, verify_chain
+from .audit import AuditLog, sha256_text, utcnow, verify_chain
+from .convert import ConversionUnavailable, convert_file, inspect_markdown
 from .pipeline import DECISIONS, VALID_RESOLUTIONS, new_run_id, resume_run, run_snapshot, start_run
 from .support import DEFAULT_MODEL, OLLAMA_HOST
 
 RUN_ID_RE = re.compile(r"^[0-9A-Za-z\-]{6,64}$")
 MAX_UPLOAD = 2 * 1024 * 1024
 ALLOWED_SUFFIXES = {".md", ".markdown", ".txt"}
+CONVERTIBLE_SUFFIXES = {".pdf", ".docx", ".html", ".htm", ".xhtml"}
+MAX_CONVERT_UPLOAD = 25 * 1024 * 1024
 
 
 class Resolution(BaseModel):
     item: str = Field(description="R<ref> or C<claim>/<ref>")
     verdict: str
     note: str = ""
+
+
+class InspectIn(BaseModel):
+    markdown: str = Field(max_length=MAX_UPLOAD)
 
 
 class ReviewIn(BaseModel):
@@ -170,20 +182,84 @@ def create_app(runs_dir: Path = Path("runs"), cache_dir: Path = Path(".rra_cache
         out.sort(key=lambda r: r["created_at"], reverse=True)
         return out
 
+    conv_root = runs_dir / "_conversions"
+
+    def conversion_dir(conversion_id: str) -> Path:
+        if not RUN_ID_RE.match(conversion_id or ""):
+            raise HTTPException(404, "Conversion not found. Upload the file again.")
+        d = conv_root / conversion_id
+        if not (d / "conversion.json").exists():
+            raise HTTPException(404, "Conversion not found. Upload the file again.")
+        return d
+
+    @app.post("/api/conversions", status_code=201)
+    def create_conversion(file: UploadFile = File(...)) -> dict:
+        """Convert a PDF, Word or HTML article to Markdown for preview. Nothing is checked yet."""
+        name = Path(file.filename or "article").name
+        suffix = Path(name).suffix.lower()
+        if suffix not in CONVERTIBLE_SUFFIXES:
+            raise HTTPException(415, "Upload a PDF, Word (.docx) or HTML file.")
+        data = file.file.read(MAX_CONVERT_UPLOAD + 1)
+        if len(data) > MAX_CONVERT_UPLOAD:
+            raise HTTPException(413, "File is larger than 25 MB.")
+        conversion_id = new_run_id()
+        d = conv_root / conversion_id
+        d.mkdir(parents=True)
+        original = d / f"original{suffix}"
+        original.write_bytes(data)
+        try:
+            conv = convert_file(original)
+        except ConversionUnavailable as e:  # missing optional library, unsupported type
+            raise HTTPException(422, str(e))
+        except Exception as e:             # corrupt or unreadable file
+            raise HTTPException(422, f"Couldn't read this file ({type(e).__name__}). "
+                                     "If it's a scanned PDF, it has no text layer to extract.")
+        (d / "converted.md").write_text(conv.markdown, encoding="utf-8")
+        record = {"conversion_id": conversion_id, "filename": name, "created_at": utcnow(),
+                  "extractor": conv.extractor, "warnings": conv.warnings,
+                  "original_sha256": sha256_text(data), "converted_sha256": sha256_text(conv.markdown),
+                  "numbered_by_converter": conv.numbered_by_converter}
+        (d / "conversion.json").write_text(json.dumps(record), encoding="utf-8")
+        return {**record, "markdown": conv.markdown, "summary": inspect_markdown(conv.markdown)}
+
+    @app.post("/api/inspect")
+    def inspect_text(body: InspectIn) -> dict:
+        """What the verifier will see in this Markdown. Used to refresh counts while editing."""
+        return inspect_markdown(body.markdown)
+
     @app.post("/api/runs", status_code=202)
-    async def create_run(file: UploadFile = File(...),
+    async def create_run(file: Optional[UploadFile] = File(None),
+                         conversion_id: Optional[str] = Form(None),
+                         markdown: Optional[str] = Form(None),
                          mode: Literal["ollama", "heuristic"] = Form("ollama"),
                          model: Optional[str] = Form(None)) -> dict:
-        name = Path(file.filename or "manuscript.md").name
-        if Path(name).suffix.lower() not in ALLOWED_SUFFIXES:
-            raise HTTPException(415, "Upload a Markdown or plain-text file (.md or .txt).")
-        data = await file.read(MAX_UPLOAD + 1)
-        if len(data) > MAX_UPLOAD:
-            raise HTTPException(413, "File is larger than 2 MB.")
-        try:
-            text = data.decode("utf-8")
-        except UnicodeDecodeError:
-            raise HTTPException(415, "File is not UTF-8 text.")
+        """Start a check from an uploaded .md/.txt file, or from a previewed conversion
+        (conversion_id plus the Markdown as the reviewer left it)."""
+        source = None
+        if conversion_id:
+            cd = conversion_dir(conversion_id)
+            source = read_json(cd / "conversion.json")
+            text = markdown if markdown is not None else (cd / "converted.md").read_text(encoding="utf-8")
+            if len(text.encode("utf-8")) > MAX_UPLOAD:
+                raise HTTPException(413, "Converted text is larger than 2 MB.")
+            name = source["filename"]
+        elif file is not None:
+            name = Path(file.filename or "manuscript.md").name
+            if Path(name).suffix.lower() not in ALLOWED_SUFFIXES:
+                raise HTTPException(415, "Upload a Markdown or plain-text file (.md or .txt), or convert "
+                                         "a PDF, Word or HTML file first.")
+            data = await file.read(MAX_UPLOAD + 1)
+            if len(data) > MAX_UPLOAD:
+                raise HTTPException(413, "File is larger than 2 MB.")
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError:
+                raise HTTPException(415, "File is not UTF-8 text.")
+        else:
+            raise HTTPException(422, "Send a file, or a conversion_id from /api/conversions.")
+        if not text.strip():
+            raise HTTPException(422, "The manuscript is empty.")
+
         run_id = new_run_id()
         d = runs_dir / run_id
         d.mkdir(parents=True)
@@ -191,11 +267,36 @@ def create_app(runs_dir: Path = Path("runs"), cache_dir: Path = Path(".rra_cache
         manuscript.write_text(text, encoding="utf-8")
         meta = {"run_id": run_id, "filename": name, "created_at": utcnow(), "mode": mode,
                 "model": (model or DEFAULT_MODEL) if mode == "ollama" else None}
+        if source:
+            original = next(cd.glob("original.*"))
+            shutil.copy2(original, d / original.name)
+            edited = sha256_text(text) != source["converted_sha256"]
+            meta["source"] = {"filename": source["filename"], "extractor": source["extractor"],
+                              "warnings": source["warnings"], "edited": edited,
+                              "original_file": original.name}
+            # first entry in the run's audit chain: what the checked text was derived from
+            AuditLog(d / "audit.jsonl").log(
+                "source_converted", filename=source["filename"], extractor=source["extractor"],
+                original_sha256=source["original_sha256"], converted_sha256=source["converted_sha256"],
+                checked_sha256=sha256_text(text), edited_by_reviewer=edited,
+                converter_warnings=source["warnings"])
         (d / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
         with jobs_lock:
             jobs[run_id] = {"status": "queued"}
         worker.submit(execute, run_id, manuscript, mode, meta["model"])
         return {"run_id": run_id, "status": "queued"}
+
+    @app.get("/api/runs/{run_id}/source")
+    def source_file(run_id: str) -> FileResponse:
+        d = run_dir_for(run_id)
+        src = (read_json(d / "meta.json") or {}).get("source")
+        if not src:
+            raise HTTPException(404, "This check was started from a Markdown file, not a conversion.")
+        return FileResponse(d / src["original_file"], filename=src["filename"])
+
+    @app.get("/api/runs/{run_id}/manuscript")
+    def manuscript_text(run_id: str) -> FileResponse:
+        return FileResponse(run_dir_for(run_id) / "manuscript.md", media_type="text/markdown; charset=utf-8")
 
     @app.get("/api/runs/{run_id}")
     def get_run(run_id: str) -> dict:
