@@ -11,7 +11,7 @@ from typing import Optional
 import httpx
 
 from .audit import AuditLog
-from .http import CachedClient, OfflineMiss
+from .http import BlockedURL, CachedClient, OfflineMiss
 from .models import ExistenceResult, ExistenceVerdict, Reference, SourceRecord
 from . import sources
 
@@ -68,19 +68,6 @@ def compare(ref: Reference, rec: SourceRecord) -> tuple[list[str], Optional[floa
     return issues, sim
 
 
-def _lookup(http: CachedClient, ref: Reference) -> tuple[Optional[SourceRecord], str]:
-    """Returns (record, how_found). Raises on non-definitive failures."""
-    if ref.doi:
-        cr = sources.crossref_by_doi(http, ref.doi)
-        oa = sources.openalex_by_doi(http, ref.doi)
-        return _merge(cr, oa), "doi"
-    if ref.arxiv_id:
-        return sources.arxiv_by_id(http, ref.arxiv_id), "arxiv"
-    if ref.pmid:
-        return sources.pubmed_by_pmid(http, ref.pmid), "pmid"
-    return None, "none"
-
-
 def _search(http: CachedClient, ref: Reference) -> tuple[Optional[SourceRecord], Optional[float]]:
     query = ref.title or ref.raw
     best, best_sim = None, 0.0
@@ -96,41 +83,134 @@ def _search(http: CachedClient, ref: Reference) -> tuple[Optional[SourceRecord],
     return best, (round(best_sim, 3) if best else None)
 
 
+# A reference formatted like a journal or conference paper (volume and pages, or a
+# journal/proceedings name). If no database has it and there is no DOI or link, that is
+# the pattern of a fabricated reference, so it stays red. Reports, standards and
+# legislation rarely match this, so they get "can't verify" instead.
+ARTICLE_SHAPE = re.compile(
+    r"\b\d{1,4}\s*\(\s*\d{1,4}\s*\)\s*[,:]?\s*[A-Za-z]?\d+"      # 12(3), 45  /  4(2):e101
+    r"|\b\d{1,4}\s*[,:]\s*(?:pp?\.\s*)?\d{1,6}\s*[-–]\s*\d{1,6}\b"   # 521, 436–444
+    r"|\b(?:vol\.|volume)\s*\d|\bpp?\.\s*\d"
+    r"|\b(?:journal|proceedings|conference|transactions|symposium)\b",
+    re.IGNORECASE)
+
+
+def looks_like_article(raw: str) -> bool:
+    return bool(ARTICLE_SHAPE.search(re.sub(r"https?://\S+", "", raw)))
+
+
+def _judge(ref: Reference, rec: SourceRecord) -> ExistenceResult:
+    issues, sim = compare(ref, rec)
+    if rec.is_retracted:
+        verdict = ExistenceVerdict.RETRACTED
+        issues.insert(0, "Work is flagged as RETRACTED")
+    elif any(i.startswith(("Title mismatch", "Year mismatch", "First author")) for i in issues):
+        verdict = ExistenceVerdict.METADATA_MISMATCH
+    else:
+        verdict = ExistenceVerdict.VERIFIED
+    return ExistenceResult(reference=ref, verdict=verdict, record=rec, title_similarity=sim, issues=issues)
+
+
+def _doi_outside_crossref(http: CachedClient, ref: Reference) -> ExistenceResult:
+    """Crossref and OpenAlex don't know this DOI. Ask doi.org before calling it missing."""
+    if not sources.doi_registered(http, ref.doi):
+        return ExistenceResult(reference=ref, verdict=ExistenceVerdict.NOT_FOUND, issues=[
+            "This DOI isn't registered with any DOI agency (checked Crossref, OpenAlex and doi.org)"])
+    try:
+        agency = sources.doi_agency(http, ref.doi)
+        rec = sources.doi_metadata(http, ref.doi, agency)
+    except (httpx.HTTPError, sources.LookupError_, OfflineMiss):
+        agency, rec = None, None
+    where = f"registered with {agency}" if agency else "registered"
+    if rec is not None and (rec.title or rec.authors):
+        res = _judge(ref, rec)
+        res.issues.insert(0, f"DOI is {where}, not Crossref, so it isn't in Crossref or OpenAlex; "
+                             "metadata came from doi.org")
+        return res
+    return ExistenceResult(reference=ref, verdict=ExistenceVerdict.EXISTS_UNINDEXED, issues=[
+        f"The DOI is real ({where}), but no title or authors could be retrieved to compare. "
+        "Open it and check it's the cited work"])
+
+
+def _segments(title: str) -> list[str]:
+    """'Powering up Britain - GOV.UK' -> ['Powering up Britain - GOV.UK', 'Powering up Britain', 'GOV.UK']"""
+    parts = [p.strip() for p in re.split(r"\s[|\-–—:·]\s", title) if p.strip()]
+    return [title] + (parts if len(parts) > 1 else [])
+
+
+def _check_link(http: CachedClient, ref: Reference) -> ExistenceResult:
+    try:
+        p = http.probe(ref.url)
+    except BlockedURL as e:
+        return ExistenceResult(reference=ref, verdict=ExistenceVerdict.UNCHECKED, issues=[
+            f"The link wasn't opened: {e}. Check it by hand"])
+    status = p["status"]
+    archive = f"https://web.archive.org/web/*/{ref.url}"
+    if status in (404, 410):
+        return ExistenceResult(reference=ref, verdict=ExistenceVerdict.NOT_FOUND, issues=[
+            f"The link is broken (HTTP {status}) and no scholarly database has this work",
+            f"It may have moved. Search for the title, or look for an archived copy: {archive}"])
+    if status >= 400 or status == 0:
+        return ExistenceResult(reference=ref, verdict=ExistenceVerdict.UNCHECKED, issues=[
+            f"The website refused an automated check (HTTP {status}). This is common and doesn't "
+            "mean the link is broken. Open it yourself"])
+    kind = ("a PDF" if "pdf" in p["content_type"] else
+            "a web page" if "html" in p["content_type"] else p["content_type"] or "a document")
+    sim = None
+    if ref.title and p.get("title"):
+        sim = max(title_similarity(ref.title, seg) or 0.0 for seg in _segments(p["title"]))
+    issues = [f"The link works ({kind}). The source isn't in Crossref, OpenAlex or arXiv, "
+              "which is normal for reports, policy documents and web pages"]
+    if p.get("title"):
+        issues.append(f"Page title: “{p['title']}”" + (f" (title match {sim:.0%})" if sim is not None else ""))
+    if sim is not None and sim < TITLE_MATCH:
+        issues.append("The page title doesn't match the reference. Check the link points to the cited document")
+    if p["final_url"] != ref.url:
+        issues.append(f"Redirected to {p['final_url']}")
+    rec = SourceRecord(source="web", identifier=ref.url, title=p.get("title"), url=p["final_url"])
+    return ExistenceResult(reference=ref, verdict=ExistenceVerdict.EXISTS_UNINDEXED, record=rec,
+                           title_similarity=round(sim, 3) if sim is not None else None, issues=issues)
+
+
+def _verify(http: CachedClient, ref: Reference) -> ExistenceResult:
+    if ref.doi:
+        rec = _merge(sources.crossref_by_doi(http, ref.doi), sources.openalex_by_doi(http, ref.doi))
+        return _judge(ref, rec) if rec else _doi_outside_crossref(http, ref)
+    if ref.arxiv_id:
+        rec = sources.arxiv_by_id(http, ref.arxiv_id)
+        return _judge(ref, rec) if rec else ExistenceResult(
+            reference=ref, verdict=ExistenceVerdict.NOT_FOUND, issues=["This arXiv ID doesn't exist"])
+    if ref.pmid:
+        rec = sources.pubmed_by_pmid(http, ref.pmid)
+        return _judge(ref, rec) if rec else ExistenceResult(
+            reference=ref, verdict=ExistenceVerdict.NOT_FOUND, issues=["This PubMed ID doesn't exist"])
+
+    rec, sim = _search(http, ref)
+    if rec is not None and (sim or 0) >= SEARCH_ACCEPT:
+        res = _judge(ref, rec)
+        if res.verdict != ExistenceVerdict.RETRACTED:
+            res.verdict = ExistenceVerdict.FOUND_BY_SEARCH
+        res.issues.insert(0, "No DOI, arXiv ID or PMID in the reference; matched by title search. "
+                             "Add the identifier")
+        return res
+    if ref.url:
+        return _check_link(http, ref)
+    if looks_like_article(ref.raw):
+        return ExistenceResult(reference=ref, verdict=ExistenceVerdict.NOT_FOUND, title_similarity=sim, issues=[
+            "Formatted like a journal or conference paper, but no database has it, and it has no DOI "
+            "or link. This is the pattern of a fabricated reference. Check it by hand"])
+    return ExistenceResult(reference=ref, verdict=ExistenceVerdict.UNVERIFIABLE, title_similarity=sim, issues=[
+        "No DOI or link, and not found in Crossref, OpenAlex or arXiv. This is common for reports, "
+        "standards and legislation. Add a link or DOI, or check it by hand"])
+
+
 def verify_reference(http: CachedClient, audit: AuditLog, ref: Reference) -> ExistenceResult:
     try:
-        rec, how = _lookup(http, ref)
-        if how == "none":
-            rec, sim = _search(http, ref)
-            if rec is None or (sim or 0) < SEARCH_ACCEPT:
-                res = ExistenceResult(reference=ref, verdict=ExistenceVerdict.NOT_FOUND,
-                                      record=None, title_similarity=sim,
-                                      issues=["No identifier given and no confident title match "
-                                              f"(best similarity {sim or 0:.2f})"])
-            else:
-                issues, sim = compare(ref, rec)
-                issues.insert(0, "No DOI/arXiv/PMID in reference; matched by title search — add the identifier")
-                verdict = (ExistenceVerdict.RETRACTED if rec.is_retracted
-                           else ExistenceVerdict.FOUND_BY_SEARCH)
-                res = ExistenceResult(reference=ref, verdict=verdict, record=rec,
-                                      title_similarity=sim, issues=issues)
-        elif rec is None:
-            res = ExistenceResult(reference=ref, verdict=ExistenceVerdict.NOT_FOUND,
-                                  issues=[f"Identifier ({how}) does not resolve in any queried database"])
-        else:
-            issues, sim = compare(ref, rec)
-            if rec.is_retracted:
-                verdict = ExistenceVerdict.RETRACTED
-                issues.insert(0, "Work is flagged as RETRACTED")
-            elif any(i.startswith(("Title mismatch", "Year mismatch", "First author")) for i in issues):
-                verdict = ExistenceVerdict.METADATA_MISMATCH
-            else:
-                verdict = ExistenceVerdict.VERIFIED
-            res = ExistenceResult(reference=ref, verdict=verdict, record=rec,
-                                  title_similarity=sim, issues=issues)
+        res = _verify(http, ref)
     except (httpx.HTTPError, sources.LookupError_, OfflineMiss) as e:
         res = ExistenceResult(reference=ref, verdict=ExistenceVerdict.UNCHECKED,
-                              issues=[f"Lookup failed ({type(e).__name__}): {str(e)[:200]} — "
-                                      "not treated as missing"])
+                              issues=[f"Lookup failed ({type(e).__name__}): {str(e)[:200]}. "
+                                      "Not treated as missing"])
     audit.log("existence_verdict", key=ref.key, verdict=res.verdict.value,
               source=res.record.source if res.record else None,
               title_similarity=res.title_similarity, issues=res.issues)

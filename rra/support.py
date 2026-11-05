@@ -93,6 +93,15 @@ def number_issues(claim_text: str, source_text: str) -> list[str]:
     return []
 
 
+def no_text_reason(rec: Optional[SourceRecord]) -> str:
+    if rec is None:
+        return "The source couldn't be found or confirmed, so there's no text to check the claim against."
+    if rec.source == "web":
+        return ("This source is a web page or document outside the scholarly databases, so there's no "
+                "abstract to check against. Open the link and check the claim yourself.")
+    return "No abstract is available from any database, so the claim can't be checked automatically."
+
+
 class HeuristicChecker:
     method = "heuristic"
 
@@ -100,7 +109,7 @@ class HeuristicChecker:
         if not rec or not rec.abstract:
             return SupportResult(claim_id=claim.id, reference_key=key,
                                  verdict=SupportVerdict.INSUFFICIENT, method=self.method,
-                                 rationale="No abstract available from any database; cannot judge.")
+                                 rationale=no_text_reason(rec))
         cw = {w for w in re.findall(r"[a-z]{3,}", _strip_citations(claim.text).lower())
               if w not in STOPWORDS}
         sw = set(re.findall(r"[a-z]{3,}", rec.abstract.lower()))
@@ -183,7 +192,7 @@ class LLMChecker:
         if not rec or not rec.abstract:
             return SupportResult(claim_id=claim.id, reference_key=key,
                                  verdict=SupportVerdict.INSUFFICIENT, method=self.method,
-                                 rationale="No abstract available from any database; cannot judge.")
+                                 rationale=no_text_reason(rec))
         prompt = (f"<claim>\n{_strip_citations(claim.text).strip()}\n</claim>\n\n"
                   f"<source_text title=\"{rec.title or ''}\">\n{rec.abstract}\n</source_text>")
         try:

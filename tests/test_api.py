@@ -125,3 +125,34 @@ def test_conversion_rejects_unsupported_and_corrupt(client):
     assert r.status_code == 422 and "Couldn't read" in r.json()["detail"]
     assert client.post("/api/runs", data={"conversion_id": "nope-000000", "mode": "heuristic"}).status_code == 404
     assert client.post("/api/runs", data={"mode": "heuristic"}).status_code == 422
+
+
+def test_reference_only_check_for_author_year_grey_literature(client):
+    md = ("# Heat networks briefing\n\nHeat networks could supply a fifth of UK heat by 2050 (CCC, 2023). "
+          "Government set out its plan in 2023 (DESNZ, 2023).\n\n## References\n\n"
+          "1. Climate Change Committee (2023). Progress in reducing emissions: 2023 Report to Parliament. "
+          "London: CCC.\n"
+          "2. DESNZ (2023). Powering up Britain. https://www.gov.uk/government/publications/powering-up-britain\n")
+    info = client.post("/api/inspect", json={"markdown": md}).json()
+    assert info["references"] == 2 and info["claims"] == 0
+    run_id = upload(client, data=md.encode(), name="briefing.md").json()["run_id"]
+    run = wait(client, run_id)
+    assert run["status"] == "awaiting_human_signoff"
+    assert run["claims"] == [] and run["counts"]["pairs"] == 0
+    assert [e["verdict"] for e in run["existence"]] == ["unverifiable", "exists_unindexed"]
+    report = client.get(f"/api/runs/{run_id}/report").text
+    assert "only the reference list was checked" in report and "Exists, not indexed" in report
+
+
+def test_unedited_preview_with_crlf_is_not_marked_edited(client):
+    pytest.importorskip("docx")
+    from pathlib import Path
+    import tempfile
+    from test_convert import make_docx
+    src = Path(tempfile.mkdtemp()) / "p.docx"
+    make_docx(src)
+    conv = client.post("/api/conversions", files={"file": ("p.docx", src.read_bytes(), "application/octet-stream")}).json()
+    crlf = conv["markdown"].replace("\n", "\r\n")            # what a browser form sends
+    run_id = client.post("/api/runs", data={"conversion_id": conv["conversion_id"], "markdown": crlf,
+                                            "mode": "heuristic"}).json()["run_id"]
+    assert wait(client, run_id)["source"]["edited"] is False

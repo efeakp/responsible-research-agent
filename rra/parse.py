@@ -13,7 +13,9 @@ from .models import Claim, Reference
 REF_HEADING = re.compile(r"^\s{0,3}(#+\s*)?(references|bibliography|works cited)\s*:?\s*$",
                          re.IGNORECASE | re.MULTILINE)
 DOI_RE = re.compile(r"\b(10\.\d{4,9}/[^\s\"<>]+)", re.IGNORECASE)
-ARXIV_RE = re.compile(r"arxiv[:\s/]*(?:abs/)?(\d{4}\.\d{4,5})(?:v\d+)?", re.IGNORECASE)
+ARXIV_RE = re.compile(r"arxiv(?:\.org)?[:\s/]*(?:abs/|pdf/)?(\d{4}\.\d{4,5})(?:v\d+)?", re.IGNORECASE)
+MD_LINK_RE = re.compile(r"\[([^\]]*)\]\(([^()\s]*(?:\([^()\s]*\)[^()\s]*)*)\)")
+URL_RE = re.compile(r"https?://[^\s<>\"\]]+", re.IGNORECASE)
 PMID_RE = re.compile(r"\bPMID[:\s]*(\d{4,9})\b", re.IGNORECASE)
 YEAR_RE = re.compile(r"\((19|20)(\d{2})[a-z]?\)|\b(19|20)(\d{2})\b")
 REF_LINE_RE = re.compile(r"^\s*(?:\[(\d+)\]|(\d+)[.)])\s+(.*\S)\s*$")
@@ -37,6 +39,23 @@ def _clean_doi(doi: str) -> str:
     if doi.count("(") > doi.count(")"):
         doi += ")"
     return doi.lower()
+
+
+def _clean_url(url: str) -> str:
+    url = url.rstrip(".,;:'\u201d\u2019")
+    while url.endswith(")") and url.count(")") > url.count("("):
+        url = url[:-1].rstrip(".,;:")
+    return url
+
+
+def _first_url(body: str) -> str | None:
+    """The first link that isn't just a DOI or arXiv address (those are handled as identifiers)."""
+    body = MD_LINK_RE.sub(r"\1 \2", body)
+    for m in URL_RE.finditer(body):
+        url = _clean_url(m.group(0))
+        if not re.search(r"//(dx\.)?doi\.org/|//arxiv\.org/", url, re.IGNORECASE):
+            return url
+    return None
 
 
 def _guess_title(body: str) -> str | None:
@@ -78,7 +97,8 @@ def parse_references(section: str) -> list[Reference]:
             doi=_clean_doi(doi.group(1)) if doi else None,
             arxiv_id=arx.group(1) if arx else None,
             pmid=pmid.group(1) if pmid else None,
-            title=_guess_title(body),
+            url=_first_url(body),
+            title=_guess_title(URL_RE.sub("", MD_LINK_RE.sub(r"\1", body))),
             first_author=_guess_first_author(body),
             year=year,
         ))

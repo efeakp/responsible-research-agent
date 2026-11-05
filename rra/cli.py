@@ -28,6 +28,7 @@ def cmd_verify(a: argparse.Namespace) -> int:
     print(f"  references: {len(ev)}  verified={ev.count('verified')}  "
           f"not_found={ev.count('not_found')}  retracted={ev.count('retracted')}  "
           f"mismatch={ev.count('metadata_mismatch')}  found_by_search={ev.count('found_by_search')}  "
+          f"exists_unindexed={ev.count('exists_unindexed')}  unverifiable={ev.count('unverifiable')}  "
           f"unchecked={ev.count('unchecked')}")
     print(f"  claim-source pairs: {len(sv)}  supported={sv.count('supported')}  "
           f"partial={sv.count('partially_supported')}  not_supported={sv.count('not_supported')}  "

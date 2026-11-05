@@ -15,7 +15,21 @@ const V: Record<string, { label: string; tone: Tone; help: string }> = {
     tone: "ochre",
     help: "No identifier given. A confident title match was found; add its identifier.",
   },
-  not_found: { label: "Not found", tone: "red", help: "Nothing in Crossref, OpenAlex, arXiv or PubMed matches." },
+  not_found: {
+    label: "Not found",
+    tone: "red",
+    help: "Its DOI, ID or link doesn't exist, or it's formatted like a journal paper that no database has.",
+  },
+  exists_unindexed: {
+    label: "Exists, not indexed",
+    tone: "ochre",
+    help: "A real DOI or working link, but not a scholarly record. Check it's the cited document.",
+  },
+  unverifiable: {
+    label: "Can't verify",
+    tone: "blue",
+    help: "No DOI or link, and not in the scholarly databases. Common for reports and legislation. Check by hand.",
+  },
   retracted: { label: "Retracted", tone: "red", help: "This work has been retracted." },
   unchecked: { label: "Couldn't check", tone: "grey", help: "A lookup failed. This is not the same as missing." },
   supported: { label: "Supported", tone: "ok", help: "The model's quote appears word for word in the source." },
@@ -41,6 +55,8 @@ export const REFERENCE_VERDICTS = [
   "metadata_mismatch",
   "found_by_search",
   "not_found",
+  "exists_unindexed",
+  "unverifiable",
   "retracted",
   "unchecked",
 ];

@@ -14,3 +14,10 @@ def _no_arxiv_wait(monkeypatch):
     import rra.http
     monkeypatch.setattr(rra.http, "MIN_INTERVAL", {})
     monkeypatch.setattr(rra.http, "_last_request", {})
+
+
+@pytest.fixture(autouse=True)
+def _no_dns(monkeypatch):
+    """Link checks resolve hostnames to block private addresses; tests use no real DNS."""
+    import rra.http
+    monkeypatch.setattr(rra.http, "_resolve", lambda host: [])

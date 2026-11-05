@@ -17,6 +17,7 @@ from .models import RunReport
 LABELS = {
     "verified": ("Verified", "ok"), "metadata_mismatch": ("Metadata mismatch", "warn"),
     "found_by_search": ("Found by search", "warn"), "not_found": ("Not found", "bad"),
+    "exists_unindexed": ("Exists, not indexed", "warn"), "unverifiable": ("Can't verify", "review"),
     "retracted": ("Retracted", "bad"), "unchecked": ("Unchecked", "muted"),
     "supported": ("Supported", "ok"), "partially_supported": ("Partially supported", "warn"),
     "not_supported": ("Not supported", "bad"), "insufficient_evidence": ("Insufficient evidence", "muted"),
@@ -75,10 +76,10 @@ td:first-child{color:var(--sub);white-space:nowrap;width:170px}
 <div class="tile"><b>{{ sc['needs_human_review'] + sc['partially_supported'] + sc['not_supported'] }}</b><span>pairs needing attention</span></div>
 </div>
 
-{% if r.unresolved_citations or r.uncited_references %}
+{% if r.unresolved_citations or (r.uncited_references and r.claims) %}
 <h2>Citation integrity</h2><div class="card">
 {% if r.unresolved_citations %}<div><span class="pill bad">Cited but not in reference list</span> [{{ r.unresolved_citations|join('], [') }}]</div>{% endif %}
-{% if r.uncited_references %}<div style="margin-top:6px"><span class="pill muted">In reference list but never cited</span> [{{ r.uncited_references|join('], [') }}]</div>{% endif %}
+{% if r.uncited_references and r.claims %}<div style="margin-top:6px"><span class="pill muted">In reference list but never cited</span> [{{ r.uncited_references|join('], [') }}]</div>{% endif %}
 </div>{% endif %}
 
 <h2>1 · Do the references exist?</h2>
@@ -91,6 +92,7 @@ td:first-child{color:var(--sub);white-space:nowrap;width:170px}
 </div>{% endfor %}
 
 <h2>2 · Do the sources support the claims?</h2>
+{% if not r.claims %}<div class="card why">No numbered citations like [1] were found in the text, so only the reference list was checked.</div>{% endif %}
 <div class="sub" style="margin:-6px 0 12px">Judged against each source's abstract only. "Supported" requires a quote that appears word-for-word in that abstract.</div>
 {% for c in r.claims %}
 <div class="card"><div class="claim"><span class="key">{{ c.id }}</span>{{ c.text }}</div>
@@ -111,6 +113,7 @@ td:first-child{color:var(--sub);white-space:nowrap;width:170px}
 </table></div>
 
 <h2>Known limitations</h2><div class="card why"><ul style="margin:0;padding-left:18px">
+<li>"Exists, not indexed" means a real DOI or a working link, but not a scholarly record. Check by hand that it is the cited document and says what is claimed.</li>
 <li>Claim support is judged against abstracts, not full text. A claim drawn from a paper's body may show as insufficient or unsupported.</li>
 <li>Numeric citation styles only ([1], [2,3], [4–6]). Author–year styles are not yet parsed.</li>
 <li>Title, author and year are parsed heuristically from reference lines; an unusual style can cause a false mismatch. Check the issue text before acting.</li>

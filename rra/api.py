@@ -240,6 +240,9 @@ def create_app(runs_dir: Path = Path("runs"), cache_dir: Path = Path(".rra_cache
             cd = conversion_dir(conversion_id)
             source = read_json(cd / "conversion.json")
             text = markdown if markdown is not None else (cd / "converted.md").read_text(encoding="utf-8")
+            # browsers send form text with CRLF line endings; normalise so an unedited preview
+            # isn't recorded as "edited"
+            text = text.replace("\r\n", "\n").replace("\r", "\n")
             if len(text.encode("utf-8")) > MAX_UPLOAD:
                 raise HTTPException(413, "Converted text is larger than 2 MB.")
             name = source["filename"]

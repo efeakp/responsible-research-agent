@@ -205,3 +205,76 @@ def pubmed_by_pmid(http: CachedClient, pmid: str) -> Optional[SourceRecord]:
         is_retracted=any("retracted publication" in p.lower() for p in pubtypes),
         url=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
     )
+
+
+# ---------- doi.org: DOIs registered with agencies other than Crossref ----------
+# Crossref and OpenAlex don't know DOIs from DataCite (Zenodo, Figshare, many datasets and
+# reports), mEDRA, JaLC and others. doi.org knows every registered DOI, whichever agency.
+
+DOI_HANDLES = "https://doi.org/api/handles/"
+DOI_RA = "https://doi.org/ra/"
+CSL_JSON = "application/vnd.citationstyles.csl+json"
+
+
+def doi_registered(http: CachedClient, doi: str) -> bool:
+    """True if the DOI is registered with any agency. Raises LookupError_ if doi.org's
+    answer is unclear, so an outage is never reported as 'does not exist'."""
+    url = DOI_HANDLES + quote(doi, safe="/()")
+    status, body = http.get(url)
+    try:
+        code = json.loads(body).get("responseCode") if body else None
+    except ValueError:
+        code = None
+    if code == 1 and status == 200:
+        return True
+    if code == 100 or (status == 404 and code is None):
+        return False
+    raise LookupError_(f"Unclear answer from doi.org (HTTP {status}, code {code})")
+
+
+def doi_agency(http: CachedClient, doi: str) -> Optional[str]:
+    """The registration agency (DataCite, Crossref, mEDRA…), or None if unknown."""
+    status, body = http.get(DOI_RA + quote(doi, safe="/()"))
+    if status != 200:
+        return None
+    try:
+        items = json.loads(body)
+    except ValueError:
+        return None
+    if isinstance(items, list) and items and isinstance(items[0], dict):
+        return items[0].get("RA")
+    return None
+
+
+def doi_metadata(http: CachedClient, doi: str, agency: Optional[str]) -> Optional[SourceRecord]:
+    """Citation metadata via doi.org content negotiation (CSL JSON). None if the agency
+    doesn't offer it."""
+    status, body = http.get(f"https://doi.org/{quote(doi, safe='/()')}", headers={"Accept": CSL_JSON})
+    if status != 200:
+        return None
+    try:
+        d = json.loads(body)
+    except ValueError:
+        return None
+    if not isinstance(d, dict):
+        return None
+    title = d.get("title")
+    if isinstance(title, list):
+        title = title[0] if title else None
+    year = None
+    parts = (d.get("issued") or {}).get("date-parts") or [[None]]
+    if parts and parts[0] and parts[0][0]:
+        try:
+            year = int(parts[0][0])
+        except (TypeError, ValueError):
+            year = None
+    return SourceRecord(
+        source=(agency or "doi.org").lower(),
+        identifier=doi,
+        title=_strip_tags(title) if isinstance(title, str) else None,
+        authors=[a.get("family") or a.get("literal") or "" for a in d.get("author") or []
+                 if isinstance(a, dict)],
+        year=year,
+        abstract=_strip_tags(d.get("abstract")) if isinstance(d.get("abstract"), str) else None,
+        url=f"https://doi.org/{doi}",
+    )

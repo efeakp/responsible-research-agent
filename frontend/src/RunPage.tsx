@@ -169,7 +169,7 @@ function Results({ run, events, onSigned }: { run: RunDetail; events: AuditEvent
       <div className="tally">
         <div><b>{c.verified} of {c.references}</b><span>references verified</span></div>
         <div className={c.reference_problems ? "red" : ""}><b>{c.reference_problems}</b><span>references with a problem</span></div>
-        <div><b>{c.supported} of {c.pairs}</b><span>claim–source pairs supported</span></div>
+        <div><b>{c.pairs ? `${c.supported} of ${c.pairs}` : "—"}</b><span>claim–source pairs supported</span></div>
         <div className={c.pairs_needing_attention ? "blue" : ""}><b>{c.pairs_needing_attention}</b><span>pairs needing attention</span></div>
       </div>
 
@@ -193,7 +193,7 @@ function Results({ run, events, onSigned }: { run: RunDetail; events: AuditEvent
                   Cited in the text but missing from the reference list: [{run.unresolved_citations.join("], [")}]
                 </div>
               )}
-              {run.uncited_references.length > 0 && (
+              {run.uncited_references.length > 0 && run.claims.length > 0 && (
                 <div className="integrity">
                   In the reference list but never cited: [{run.uncited_references.join("], [")}]
                 </div>
@@ -205,7 +205,13 @@ function Results({ run, events, onSigned }: { run: RunDetail; events: AuditEvent
                   Each sentence is tested against the abstract of every source it cites. Select a mark in the margin to
                   see the evidence{reviewing ? " and give your own verdict" : ""}.
                 </p>
-                {claims.length === 0 && <p className="small">Nothing here needs attention.</p>}
+                {run.claims.length === 0 ? (
+                  <p className="small">
+                    No numbered citations like [1] were found in the text, so only the reference list was checked.
+                  </p>
+                ) : (
+                  claims.length === 0 && <p className="small">Nothing here needs attention.</p>
+                )}
                 {claims.map((cl) => (
                   <ClaimEntry
                     key={cl.id}
@@ -408,7 +414,7 @@ function ReferenceEntry(props: {
         <div className="detail">
           {e.record ? (
             <h4>
-              Found in {e.record.source}:{" "}
+              {e.record.source === "web" ? "Link checked:" : `Found in ${e.record.source}:`}{" "}
               {e.record.url ? <a href={e.record.url} target="_blank" rel="noreferrer">{e.record.title}</a> : e.record.title}
               {e.record.year ? ` (${e.record.year})` : ""}
             </h4>
@@ -538,6 +544,10 @@ function summarise(e: AuditEvent): string {
       return `Mode ${d.mode}${d.model?.model ? `, model ${d.model.model}` : ""}${d.model?.digest ? ` (${String(d.model.digest).slice(0, 19)}…)` : ""}`;
     case "parsed":
       return `${d.references?.length ?? 0} references, ${d.claims?.length ?? 0} cited claims`;
+    case "http_probe":
+      return `${d.status ?? "—"} ${d.cache === "hit" ? "(cached) " : ""}link check ${d.url}${d.title ? ` — “${d.title}”` : ""}`;
+    case "http_probe_blocked":
+      return `Not opened: ${d.reason}`;
     case "http_get":
       return `${d.status ?? "—"} ${d.cache === "hit" ? "(cached) " : ""}${d.url}`;
     case "http_error":

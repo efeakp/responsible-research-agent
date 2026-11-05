@@ -84,7 +84,7 @@ Runs are processed one at a time, which respects arXiv's one-connection rule. Th
 
 ```bash
 python examples/demo_offline.py --signoff   # mocked APIs and a scripted stand-in model
-pytest -q                                   # 34 tests (engine, API, converter)
+pytest -q                                   # 51 tests (engine, API, converter)
 ```
 
 ## Converting articles to Markdown
@@ -121,6 +121,18 @@ rra signoff runs/<run-id> --reviewer "Efe A" --decision approve_with_changes \
 
 Each run writes `runs/<run-id>/` containing `report.html`, `report.json` and `audit.jsonl`. Checkpoints for all runs are stored in `runs/checkpoints.sqlite`.
 
+## Sources outside the scholarly databases
+
+Many legitimate sources aren't in Crossref, OpenAlex, arXiv or PubMed: government and regulator reports, think-tank papers, standards, legislation, web pages, and datasets with DataCite DOIs (Zenodo, Figshare). The checker tries not to treat these as missing:
+
+1. **DOIs not known to Crossref** are checked at doi.org, which knows every registered DOI whatever the agency. If doi.org has metadata (DataCite usually does), the title, author and year are compared as normal and the reference can be *verified*. If the DOI is registered but has no metadata, it is marked *exists, not indexed*. Only a DOI that isn't registered anywhere is *not found*.
+2. **Links** are opened to check they work. The checker reads only the page title, not the whole document, and ignores site suffixes like "- GOV.UK" when matching titles. A working link is *exists, not indexed*. A broken one (404 or 410) is *not found*, with a link to search the Internet Archive. If a site refuses automated checks (403, rate limits), the result is *couldn't check*, never *not found*. Links to this computer or the local network are never opened.
+3. **No DOI and no link:** if the reference is formatted like a journal or conference paper (a volume and pages, or a journal name) and no database has it, it stays red *not found*, because that's the usual pattern of a fabricated reference. Otherwise it's *can't verify*: a person has to check it.
+
+These sources have no abstract to compare against, so their claim checks come back as *no text to check*, with a prompt to check the claim against the source yourself.
+
+**Documents without numbered citations**, such as author–year styles, can still be checked: the reference list is verified, and the run says no claims were checked.
+
 ## Choosing a model
 
 Small local models are weaker judges than large hosted ones. The design compensates:
@@ -139,7 +151,9 @@ Expect more *needs human review* results from an 8B model than from a larger one
 | Reference | verified | Identifier resolves; title, first author and year match |
 | | metadata_mismatch | Resolves, but the record is a different work or details disagree |
 | | found_by_search | No identifier given; confident title match found |
-| | not_found | Identifier does not resolve, or no confident match |
+| | exists_unindexed | Real, but not a scholarly record: a DOI registered with another agency that has no metadata, or a working link. Check by hand that it is the cited document |
+| | unverifiable | No DOI or link, and not in the databases. Typical of reports, standards and legislation. Check by hand |
+| | not_found | The DOI, arXiv ID, PMID or link doesn't exist, or the reference is formatted like a journal paper that no database has |
 | | retracted | Exists, but retracted |
 | | unchecked | Lookup failed (network etc.). Never treated as "not found" |
 | Claim | supported | Model verdict backed by a verbatim quote from the source |

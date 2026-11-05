@@ -13,7 +13,9 @@ class ExistenceVerdict(str, Enum):
     VERIFIED = "verified"                # identifier resolves and metadata matches
     METADATA_MISMATCH = "metadata_mismatch"  # resolves, but title/author/year disagree
     FOUND_BY_SEARCH = "found_by_search"  # no identifier given, strong title match found
-    NOT_FOUND = "not_found"              # identifier does not resolve / no match
+    NOT_FOUND = "not_found"              # identifier or link doesn't exist, or article-shaped and nowhere
+    EXISTS_UNINDEXED = "exists_unindexed"  # real (registered DOI / live link) but not in scholarly databases
+    UNVERIFIABLE = "unverifiable"        # no identifier or link, not article-shaped, not found: a person checks
     RETRACTED = "retracted"              # exists but has been retracted
     UNCHECKED = "unchecked"              # lookup failed (network error etc.)
 
@@ -32,6 +34,7 @@ class Reference(BaseModel):
     doi: Optional[str] = None
     arxiv_id: Optional[str] = None
     pmid: Optional[str] = None
+    url: Optional[str] = None
     title: Optional[str] = None
     first_author: Optional[str] = None
     year: Optional[int] = None

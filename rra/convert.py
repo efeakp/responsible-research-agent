@@ -232,9 +232,10 @@ def to_markdown(raw: str, extractor: str = "text") -> Conversion:
     body = _join_paragraphs([_normalise_citations(l) for l in body_lines])
     cites = re.findall(r"\[(\d[\d,\s\-–]*)\]", body)
     if not cites:
-        conv.warnings.append("No numeric citations like [1] found in the text. Author–year citations "
-                             "(Smith, 2020) aren't supported yet, and superscript numbers from PDFs are "
-                             "often lost in extraction.")
+        conv.warnings.append("No numbered citations like [1] were found, so only the reference list can be "
+                             "checked. Author–year citations (Smith, 2020) aren't supported yet. Superscript "
+                             "numbers in PDFs are often lost in extraction; if the article uses them, try "
+                             "its Word or HTML version.")
     # sections after the reference list (appendix, acknowledgements…) go before it,
     # so the verifier doesn't mistake them for references
     if any(l.strip() for l in tail):

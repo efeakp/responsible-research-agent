@@ -71,6 +71,28 @@ ARXIV_FEED = f"""<?xml version="1.0" encoding="UTF-8"?>
 </entry></feed>"""
 
 
+# DOIs registered with agencies other than Crossref (synthetic, test-only)
+DOI_ELSEWHERE = {
+    "10.5281/zenodo.0000001": {"ra": "DataCite", "csl": {
+        "type": "dataset", "title": "UK heat network performance dataset 2015-2023",
+        "author": [{"family": "Akande", "given": "T."}], "issued": {"date-parts": [[2024, 3]]},
+        "abstract": "<p>Metered heat demand for 120 UK heat networks.</p>"}},
+    "10.99999/registered.nometa": {"ra": "mEDRA", "csl": None},
+}
+
+# web pages for link checks (synthetic)
+WEB = {
+    "https://www.gov.uk/government/publications/powering-up-britain":
+        (200, "text/html; charset=utf-8", "<html><head><title>Powering up Britain - GOV.UK</title></head>"
+                                          "<body>" + "x" * 1000 + "</body></html>"),
+    "https://www.example.org/report.pdf": (200, "application/pdf", "%PDF-1.7 ..."),
+    "https://www.example.org/old-report": (404, "text/html", "<title>Page not found</title>"),
+    "https://cloudflare.example.org/report": (403, "text/html", "<title>Just a moment...</title>"),
+    "https://www.example.org/moved": (301, "text/html", "https://www.gov.uk/government/publications/powering-up-britain"),
+    "https://www.example.org/wrong-page": (200, "text/html", "<title>Annual accounts 2022 | Example Ltd</title>"),
+}
+
+
 def _inverted(text: str) -> dict:
     inv: dict[str, list[int]] = {}
     for i, w in enumerate(text.split()):
@@ -122,6 +144,28 @@ def make_transport(llm_handler=None, fail_hosts: set[str] | None = None) -> http
                      "details": {"parameter_size": "8.0B", "quantization_level": "Q4_K_M"}}]})
             if u.path == "/api/chat" and llm_handler:
                 return llm_handler(json.loads(request.content))
+        if u.netloc == "doi.org":
+            if u.path.startswith("/api/handles/"):
+                doi = unquote(u.path[len("/api/handles/"):]).lower()
+                if doi in DOI_ELSEWHERE or doi in CROSSREF:
+                    return httpx.Response(200, json={"responseCode": 1, "handle": doi})
+                return httpx.Response(404, json={"responseCode": 100})
+            if u.path.startswith("/ra/"):
+                doi = unquote(u.path[len("/ra/"):]).lower()
+                if doi in DOI_ELSEWHERE:
+                    return httpx.Response(200, json=[{"DOI": doi, "RA": DOI_ELSEWHERE[doi]["ra"]}])
+                return httpx.Response(200, json=[{"DOI": doi, "status": "DOI does not exist"}])
+            doi = unquote(u.path[1:]).lower()
+            entry = DOI_ELSEWHERE.get(doi)
+            if entry and entry["csl"] and "csl+json" in request.headers.get("accept", ""):
+                return httpx.Response(200, json=entry["csl"])
+            return httpx.Response(406)
+        key = str(request.url)
+        if key in WEB:
+            status, ctype, body = WEB[key]
+            if status in (301, 302):
+                return httpx.Response(status, headers={"location": body})
+            return httpx.Response(status, headers={"content-type": ctype}, content=body.encode())
         return httpx.Response(404)
 
     return httpx.MockTransport(handler)

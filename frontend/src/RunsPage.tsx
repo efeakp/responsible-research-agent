@@ -287,7 +287,9 @@ function Preview(props: { conversion: ConversionOut; mode: "ollama" | "heuristic
     };
   }, [text, edited, conversion.summary]);
 
-  const blocking = summary.references === 0 || summary.claims === 0;
+  const blocking = summary.references === 0;
+  const referencesOnly = !blocking && summary.claims === 0;
+  const converterSaidSo = conversion.warnings.some((w) => w.startsWith("No numbered citations"));
 
   const start = async () => {
     setBusy(true);
@@ -327,7 +329,7 @@ function Preview(props: { conversion: ConversionOut; mode: "ollama" | "heuristic
           <b>{summary.with_identifier}</b>
           <span>with a DOI, arXiv ID or PMID</span>
         </div>
-        <div className={summary.claims === 0 ? "red" : ""}>
+        <div>
           <b>{summary.claims}</b>
           <span>sentences with citations</span>
         </div>
@@ -337,7 +339,7 @@ function Preview(props: { conversion: ConversionOut; mode: "ollama" | "heuristic
         </div>
       </div>
 
-      {(conversion.warnings.length > 0 || summary.missing_citations.length > 0 || blocking) && (
+      {(conversion.warnings.length > 0 || summary.missing_citations.length > 0 || blocking || referencesOnly) && (
         <ul className="conv-warnings">
           {summary.references === 0 && (
             <li>
@@ -345,8 +347,11 @@ function Preview(props: { conversion: ConversionOut; mode: "ollama" | "heuristic
               per line.
             </li>
           )}
-          {summary.claims === 0 && summary.references > 0 && (
-            <li>No citations like [1] found in the text, so there are no claims to check against sources.</li>
+          {referencesOnly && !converterSaidSo && (
+            <li>
+              No numbered citations like [1] were found, so only the reference list will be checked. Author–year
+              citations such as (Smith, 2020) aren't supported yet.
+            </li>
           )}
           {summary.missing_citations.length > 0 && (
             <li>
@@ -368,7 +373,7 @@ function Preview(props: { conversion: ConversionOut; mode: "ollama" | "heuristic
       {error && <p className="err">{error}</p>}
       <div className="preview-actions">
         <button className="btn" disabled={busy || blocking} onClick={start}>
-          {busy ? "Starting…" : "Start check"}
+          {busy ? "Starting…" : referencesOnly ? "Check references only" : "Start check"}
         </button>
         {edited && (
           <button className="btn ghost" onClick={() => setText(conversion.markdown)} disabled={busy}>
@@ -379,7 +384,7 @@ function Preview(props: { conversion: ConversionOut; mode: "ollama" | "heuristic
           Choose a different file
         </button>
       </div>
-      {blocking && <p className="small">The check can start once the text has both a reference list and citations.</p>}
+      {blocking && <p className="small">The check can start once the text has a reference list.</p>}
       {edited && !blocking && (
         <p className="small">Your edits are recorded in the audit trail, alongside a fingerprint of the original file.</p>
       )}

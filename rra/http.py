@@ -8,7 +8,11 @@ live databases have changed.
 
 from __future__ import annotations
 
+import html
+import ipaddress
 import json
+import re
+import socket
 import threading
 import time
 from pathlib import Path
@@ -52,6 +56,52 @@ class OfflineMiss(Exception):
     pass
 
 
+class BlockedURL(Exception):
+    """A link in a manuscript points somewhere the checker must not fetch."""
+
+
+def _resolve(host: str) -> list[str]:
+    try:
+        return sorted({ai[4][0] for ai in socket.getaddrinfo(host, None)})
+    except (socket.gaierror, UnicodeError, OSError):
+        return []
+
+
+def check_public_url(url: str) -> None:
+    """Refuse links to this machine or the local network. Manuscripts are untrusted input,
+    and a link like http://localhost:11434/... must not make the server call itself."""
+    u = httpx.URL(url)
+    if u.scheme not in ("http", "https"):
+        raise BlockedURL(f"only http and https links are checked (got {u.scheme or 'none'})")
+    host = (u.host or "").lower()
+    if not host:
+        raise BlockedURL("link has no host")
+    if host == "localhost" or host.endswith((".localhost", ".local", ".internal", ".lan")):
+        raise BlockedURL(f"{host} is a local address")
+    try:
+        addresses = [ipaddress.ip_address(host)]
+    except ValueError:
+        addresses = [ipaddress.ip_address(a.split("%")[0]) for a in _resolve(host)]
+    for ip in addresses:
+        if not ip.is_global:
+            raise BlockedURL(f"{host} resolves to a private or local address ({ip})")
+
+
+_TITLE_RE = re.compile(rb"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+_OG_TITLE_RE = re.compile(rb"<meta[^>]+property=[\"']og:title[\"'][^>]+content=[\"']([^\"']+)", re.IGNORECASE)
+PROBE_BYTES = 256 * 1024
+REDIRECTS = {301, 302, 303, 307, 308}
+
+
+def _page_title(head: bytes) -> Optional[str]:
+    m = _OG_TITLE_RE.search(head) or _TITLE_RE.search(head)
+    if not m:
+        return None
+    t = html.unescape(m.group(1).decode("utf-8", errors="replace"))
+    t = re.sub(r"\s+", " ", t).strip()
+    return t[:300] or None
+
+
 class CachedClient:
     def __init__(self, cache_dir: Path, audit: AuditLog, offline: bool = False,
                  mailto: Optional[str] = None, transport: httpx.BaseTransport | None = None,
@@ -67,9 +117,11 @@ class CachedClient:
     def _cache_path(self, url: str) -> Path:
         return self.cache_dir / f"{sha256_text(url)[:32]}.json"
 
-    def get(self, url: str, params: dict | None = None) -> tuple[int, str]:
+    def get(self, url: str, params: dict | None = None,
+            headers: dict | None = None) -> tuple[int, str]:
         full = str(httpx.URL(url, params=params or {}))
-        cp = self._cache_path(full)
+        accept = (headers or {}).get("Accept")
+        cp = self._cache_path(full + (f"|accept={accept}" if accept else ""))
         if cp.exists():
             cached = json.loads(cp.read_text(encoding="utf-8"))
             self.audit.log("http_get", url=full, status=cached["status"], cache="hit",
@@ -81,7 +133,7 @@ class CachedClient:
         host = httpx.URL(full).host
         lock = _throttle(host)
         try:
-            r = self.client.get(full)
+            r = self.client.get(full, headers=headers)
             status, body = r.status_code, r.text
         except httpx.HTTPError as e:
             self.audit.log("http_error", url=full, error=type(e).__name__, detail=str(e)[:300])
@@ -97,6 +149,57 @@ class CachedClient:
         self.audit.log("http_get", url=full, status=status, cache="miss",
                        response_sha256=sha256_text(body))
         return status, body
+
+    def probe(self, url: str) -> dict:
+        """Check that a link works, without downloading the document: status, final URL,
+        content type and page title. Redirects are followed by hand so every hop is
+        checked against private addresses. Cached and logged like every other request."""
+        cp = self._cache_path("probe:" + url)
+        if cp.exists():
+            result = json.loads(cp.read_text(encoding="utf-8"))
+            self.audit.log("http_probe", cache="hit", **result)
+            return result
+        if self.offline:
+            self.audit.log("http_probe", url=url, cache="miss_offline")
+            raise OfflineMiss(url)
+        current, status, ctype, head, final = url, 0, "", b"", url
+        try:
+            for _ in range(6):
+                check_public_url(current)
+                host = httpx.URL(current).host
+                lock = _throttle(host)
+                try:
+                    with self.client.stream("GET", current, follow_redirects=False, timeout=15,
+                                            headers={"Accept": "text/html,application/pdf;q=0.9,*/*;q=0.5"}) as r:
+                        if r.status_code in REDIRECTS and r.headers.get("location"):
+                            current = str(r.url.join(r.headers["location"]))
+                            continue
+                        status, final = r.status_code, str(r.url)
+                        ctype = r.headers.get("content-type", "").split(";")[0].strip().lower()
+                        if status < 400 and ("html" in ctype or not ctype):
+                            for chunk in r.iter_bytes():
+                                head += chunk
+                                if len(head) >= PROBE_BYTES or b"</title>" in head.lower():
+                                    break
+                    break
+                finally:
+                    if lock is not None:
+                        _last_request[host] = _clock()
+                        lock.release()
+            else:
+                raise httpx.TooManyRedirects("more than 5 redirects", request=None)
+        except BlockedURL as e:
+            self.audit.log("http_probe_blocked", url=current, reason=str(e))
+            raise
+        except httpx.HTTPError as e:
+            self.audit.log("http_error", url=current, error=type(e).__name__, detail=str(e)[:300])
+            raise
+        result = {"url": url, "final_url": final, "status": status, "content_type": ctype,
+                  "title": _page_title(head)}
+        if status < 300 or status in (404, 410):
+            cp.write_text(json.dumps(result), encoding="utf-8")
+        self.audit.log("http_probe", cache="miss", **result)
+        return result
 
     def post_json(self, url: str, payload: dict, headers: dict) -> tuple[int, str]:
         """Uncached POST (used for LLM calls; those are logged separately with prompt hashes)."""
