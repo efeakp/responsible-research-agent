@@ -65,6 +65,30 @@ def _pdf(path: Path) -> tuple[str, str]:
     return "\n\n".join(pages), "pypdf"
 
 
+def _docx_runs(paragraph) -> list[tuple[str, bool]]:
+    """Every run's text in document order, including runs inside hyperlinks, fields and
+    content controls (where reference managers put citations, and where clickable DOIs
+    live). Skips tracked deletions and text boxes. Returns (text, is_superscript)."""
+    from docx.oxml.ns import qn
+    from docx.text.run import Run
+    skip = {qn("w:del"), qn("w:moveFrom"), qn("w:txbxContent")}
+    root = paragraph._p
+    pieces: list[tuple[str, bool]] = []
+    for r in root.iter(qn("w:r")):
+        node, skipped = r.getparent(), False
+        while node is not None and node is not root:
+            if node.tag in skip:
+                skipped = True
+                break
+            node = node.getparent()
+        if skipped:
+            continue
+        run = Run(r, paragraph)
+        if run.text:
+            pieces.append((run.text, bool(run.font.superscript)))
+    return pieces
+
+
 def _docx(path: Path) -> tuple[str, str]:
     try:
         import docx
@@ -73,7 +97,21 @@ def _docx(path: Path) -> tuple[str, str]:
     d = docx.Document(str(path))
     out = []
     for p in d.paragraphs:
-        text = p.text.strip()
+        pieces = _docx_runs(p)
+        # merge neighbouring superscript runs: Word often splits "1,2" into "1" "," "2"
+        merged: list[list] = []
+        for text, sup in pieces:
+            if merged and merged[-1][1] and sup:
+                merged[-1][0] += text
+            else:
+                merged.append([text, sup])
+        parts = []
+        for text, sup in merged:
+            if sup and re.fullmatch(r"[\d,\-–\s]+", text) and re.search(r"\d", text):
+                digits = re.sub(r"\s+", "", text).strip(",")
+                text = "[" + digits + "]"                     # superscript citation numbers become [n]
+            parts.append(text)
+        text = "".join(parts).strip()
         if not text:
             out.append("")
             continue
@@ -82,14 +120,7 @@ def _docx(path: Path) -> tuple[str, str]:
             level = int(re.sub(r"\D", "", style) or 1) if style != "title" else 1
             out.append(f"{'#' * min(level + 1, 6)} {text}")
         else:
-            # Word superscript runs (citation numbers) become [n]
-            parts = []
-            for run in p.runs:
-                t = run.text
-                if run.font.superscript and re.fullmatch(r"[\d,\-–\s]+", t or ""):
-                    t = f"[{t.strip()}]"
-                parts.append(t)
-            out.append("".join(parts).strip())
+            out.append(text)
         out.append("")
     return "\n".join(out), "python-docx"
 

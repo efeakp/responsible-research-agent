@@ -172,3 +172,45 @@ def test_single_numbered_reference_not_renumbered():
     conv = to_markdown("# **Title**\n\nA claim [1].\n\nReferences\n1. Smith J. (2020). A title here. J.\n")
     assert "1. Smith J." in conv.markdown and "1. 1." not in conv.markdown
     assert conv.markdown.startswith("# Title")          # bold markers removed from headings
+
+
+def test_docx_keeps_hyperlinks_fields_and_split_superscripts(tmp_path):
+    docx = pytest.importorskip("docx")
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    def run_el(text, sup=False, deleted=False, instr=False):
+        r = OxmlElement("w:r")
+        if sup:
+            rpr = OxmlElement("w:rPr"); va = OxmlElement("w:vertAlign")
+            va.set(qn("w:val"), "superscript"); rpr.append(va); r.append(rpr)
+        t = OxmlElement("w:delText" if deleted else "w:instrText" if instr else "w:t")
+        t.set(qn("xml:space"), "preserve"); t.text = text; r.append(t)
+        return r
+
+    d = docx.Document()
+    p = d.add_paragraph("Claim one")
+    sdt = OxmlElement("w:sdt"); content = OxmlElement("w:sdtContent")   # Mendeley/EndNote content control
+    content.append(run_el("1", sup=True)); sdt.append(content); p._p.append(sdt)
+    p.add_run(". Claim two")
+    for piece in ["2", ",", "3"]:                                          # Word splits superscripts
+        p._p.append(run_el(piece, sup=True))
+    p._p.append(run_el(' ADDIN ZOTERO_ITEM CSL_CITATION {"big": "json"} ', instr=True))  # field code
+    dele = OxmlElement("w:del"); dele.append(run_el(" deleted text", deleted=True)); p._p.append(dele)
+    p.add_run(". Claim three")
+    h = OxmlElement("w:hyperlink"); h.set(qn("w:anchor"), "r1"); h.append(run_el("[1]")); p._p.append(h)
+    p.add_run(".")
+    d.add_heading("References", 1)
+    ref = d.add_paragraph("1. LeCun Y, Bengio Y, Hinton G. (2015). Deep learning. Nature 521, 436–444. ")
+    h = OxmlElement("w:hyperlink"); h.append(run_el("https://doi.org/10.1038/nature14539")); ref._p.append(h)
+    d.add_paragraph("2. Vaswani A, et al. (2017). Attention is all you need. arXiv:1706.03762")
+    d.add_paragraph("3. Page MJ, et al. (2021). The PRISMA 2020 statement. BMJ 372, n71. doi:10.1136/bmj.n71")
+    path = tmp_path / "fields.docx"
+    d.save(str(path))
+
+    md = convert_file(path).markdown
+    assert "Claim one[1]. Claim two[2,3]. Claim three[1]." in md
+    assert "ZOTERO" not in md and "deleted text" not in md
+    refs, claims = verifier_view(md)
+    assert refs[0].doi == "10.1038/nature14539"
+    assert [c.cited_keys for c in claims] == [["1"], ["2", "3"], ["1"]]
