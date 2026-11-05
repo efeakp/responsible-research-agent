@@ -145,6 +145,13 @@ class CachedClient:
         if key:
             self.secret_params["api.openalex.org"] = {"api_key": key}
 
+    def _redact(self, text: str) -> str:
+        for params in self.secret_params.values():
+            for value in params.values():
+                if value:
+                    text = text.replace(value, "***")
+        return text
+
     def _cache_path(self, url: str) -> Path:
         return self.cache_dir / f"{sha256_text(url)[:32]}.json"
 
@@ -169,7 +176,11 @@ class CachedClient:
                 r = self.client.get(wire, headers=headers)
                 status, body = r.status_code, r.text
             except httpx.HTTPError as e:
-                self.audit.log("http_error", url=full, error=type(e).__name__, detail=str(e)[:300])
+                detail = self._redact(str(e))
+                self.audit.log("http_error", url=full, error=type(e).__name__, detail=detail[:300])
+                if detail != str(e):
+                    # the message contained a secret: replace the exception, dropping the original
+                    raise httpx.TransportError(f"{type(e).__name__}: {detail}") from None
                 raise
             finally:
                 if lock is not None:

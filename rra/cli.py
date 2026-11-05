@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from .audit import verify_chain
+from .config import load_dotenv
 from .pipeline import (DECISIONS, VALID_RESOLUTIONS, build_graph, mermaid, resume_run,
                        start_run)
 from .support import OLLAMA_HOST, OllamaUnavailable
@@ -186,6 +187,9 @@ def main(argv: list[str] | None = None) -> int:
     sv.set_defaults(func=cmd_serve)
 
     a = p.parse_args(argv)
+    loaded = load_dotenv()
+    if loaded:
+        print(f"Loaded {', '.join(loaded)} from .env", file=sys.stderr)   # names only, never values
     return a.func(a)
 
 

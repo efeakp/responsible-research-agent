@@ -21,3 +21,10 @@ def _no_dns(monkeypatch):
     """Link checks resolve hostnames to block private addresses; tests use no real DNS."""
     import rra.http
     monkeypatch.setattr(rra.http, "_resolve", lambda host: [])
+
+
+@pytest.fixture(autouse=True)
+def _no_dotenv(monkeypatch):
+    """Tests never read your real .env (and so never see your API key)."""
+    import rra.cli
+    monkeypatch.setattr(rra.cli, "load_dotenv", lambda *a, **k: [])

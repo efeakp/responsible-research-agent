@@ -230,3 +230,17 @@ def test_misspelt_authors_on_title_match_show_as_mismatch(tmp_path):
     r = verify_reference(http, audit, ref)
     assert r.verdict == V.METADATA_MISMATCH
     assert any("Cirotha" in i for i in r.issues) and r.record.identifier == "10.1000/lca.1"
+
+
+def test_openalex_key_is_redacted_from_network_errors(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENALEX_API_KEY", "secret-key-123")
+
+    def handler(req):
+        raise httpx.ConnectError(f"connection failed for {req.url}", request=req)
+    http, audit = _client(tmp_path, handler)
+    ref = parse_references("1. Braun, V. & Clarke, V. (2006) Using thematic analysis in psychology. "
+                           "Qualitative Research in Psychology, 3 (2), 77–101.")[0]
+    r = verify_reference(http, audit, ref)
+    assert r.verdict == V.UNCHECKED
+    assert "secret-key-123" not in " ".join(r.issues)
+    assert "secret-key-123" not in (tmp_path / "audit.jsonl").read_text(encoding="utf-8")

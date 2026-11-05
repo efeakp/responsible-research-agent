@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field
 
 from . import __version__
 from .audit import AuditLog, sha256_text, utcnow, verify_chain
+from .config import load_dotenv
 from .convert import ConversionUnavailable, convert_file, inspect_markdown
 from .pipeline import DECISIONS, VALID_RESOLUTIONS, new_run_id, resume_run, run_snapshot, start_run
 from .support import DEFAULT_MODEL, OLLAMA_HOST
@@ -159,6 +160,8 @@ def create_app(runs_dir: Path = Path("runs"), cache_dir: Path = Path(".rra_cache
     @app.get("/api/health")
     def health() -> dict:
         info: dict[str, Any] = {"version": __version__, "default_model": DEFAULT_MODEL,
+                                # whether a key is configured; the key itself is never returned
+                                "openalex_api_key": bool(os.environ.get("OPENALEX_API_KEY", "").strip()),
                                 "ollama": {"host": ollama_host, "reachable": False, "models": []}}
         try:
             with httpx.Client(transport=transport, timeout=3) as c:
@@ -361,6 +364,7 @@ def create_app(runs_dir: Path = Path("runs"), cache_dir: Path = Path(".rra_cache
 
 def default_app() -> FastAPI:
     """Factory for `uvicorn --factory rra.api:default_app` (used by `rra serve`)."""
+    load_dotenv()
     return create_app(Path(os.environ.get("RRA_RUNS", "runs")),
                       Path(os.environ.get("RRA_CACHE", ".rra_cache")),
                       ollama_host=os.environ.get("RRA_OLLAMA_HOST", OLLAMA_HOST))
