@@ -11,6 +11,7 @@ from __future__ import annotations
 import html
 import ipaddress
 import json
+import os
 import re
 import socket
 import threading
@@ -29,7 +30,32 @@ USER_AGENT = f"ResponsibleResearchAgent/{__version__} (prototype)"
 # Minimum seconds between live requests to a host, shared across the whole process.
 # arXiv API terms of use: no more than one request every three seconds, one connection
 # at a time (https://info.arxiv.org/help/api/tou.html). Cache hits are not throttled.
-MIN_INTERVAL: dict[str, float] = {"export.arxiv.org": 3.0}
+MIN_INTERVAL: dict[str, float] = {
+    "export.arxiv.org": 3.0,
+    "api.openalex.org": 0.15,
+    "api.crossref.org": 0.1,
+    "doi.org": 0.1,
+    "eutils.ncbi.nlm.nih.gov": 0.34,   # NCBI: 3 requests a second without an API key
+}
+
+# 429 / temporary server errors are retried with backoff. A 429 that says the limit resets
+# in more than a short while (e.g. OpenAlex's daily budget) is not retried: waiting won't help.
+RETRY_STATUSES = {429, 502, 503, 504}
+MAX_RETRIES = 3
+MAX_RETRY_WAIT = 30.0
+
+
+def _retry_wait(headers: httpx.Headers, attempt: int) -> Optional[float]:
+    for name in ("retry-after", "x-ratelimit-reset"):
+        value = headers.get(name)
+        if value is None:
+            continue
+        try:
+            seconds = float(value)
+        except ValueError:
+            continue
+        return seconds if seconds <= MAX_RETRY_WAIT else None
+    return 1.5 * (2 ** attempt)
 _last_request: dict[str, float] = {}
 _host_locks: dict[str, threading.Lock] = {}
 _registry_lock = threading.Lock()
@@ -113,6 +139,11 @@ class CachedClient:
         ua = USER_AGENT + (f" mailto:{mailto}" if mailto else "")
         self.client = httpx.Client(headers={"User-Agent": ua}, timeout=timeout,
                                    transport=transport, follow_redirects=True)
+        # Secret query parameters, added only on the wire: never in the cache key or audit log.
+        self.secret_params: dict[str, dict[str, str]] = {}
+        key = os.environ.get("OPENALEX_API_KEY", "").strip()
+        if key:
+            self.secret_params["api.openalex.org"] = {"api_key": key}
 
     def _cache_path(self, url: str) -> Path:
         return self.cache_dir / f"{sha256_text(url)[:32]}.json"
@@ -131,17 +162,28 @@ class CachedClient:
             self.audit.log("http_get", url=full, status=None, cache="miss_offline")
             raise OfflineMiss(full)
         host = httpx.URL(full).host
-        lock = _throttle(host)
-        try:
-            r = self.client.get(full, headers=headers)
-            status, body = r.status_code, r.text
-        except httpx.HTTPError as e:
-            self.audit.log("http_error", url=full, error=type(e).__name__, detail=str(e)[:300])
-            raise
-        finally:
-            if lock is not None:
-                _last_request[host] = _clock()
-                lock.release()
+        wire = httpx.URL(full).copy_merge_params(self.secret_params[host]) if host in self.secret_params else full
+        for attempt in range(MAX_RETRIES + 1):
+            lock = _throttle(host)
+            try:
+                r = self.client.get(wire, headers=headers)
+                status, body = r.status_code, r.text
+            except httpx.HTTPError as e:
+                self.audit.log("http_error", url=full, error=type(e).__name__, detail=str(e)[:300])
+                raise
+            finally:
+                if lock is not None:
+                    _last_request[host] = _clock()
+                    lock.release()
+            if status not in RETRY_STATUSES or attempt == MAX_RETRIES:
+                break
+            wait = _retry_wait(r.headers, attempt)
+            if wait is None:
+                self.audit.log("http_get", url=full, status=status, cache="miss", retry="gave_up",
+                               detail="rate limit resets too far ahead to wait")
+                break
+            self.audit.log("http_retry", url=full, status=status, wait_s=round(wait, 2), attempt=attempt + 1)
+            _sleep(wait)
         # cache only definitive answers (2xx and 404); retry-worthy errors are not cached
         if status < 300 or status == 404:
             cp.write_text(json.dumps({"url": full, "status": status, "body": body}),

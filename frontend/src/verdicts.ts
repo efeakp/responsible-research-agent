@@ -8,7 +8,7 @@ const V: Record<string, { label: string; tone: Tone; help: string }> = {
   metadata_mismatch: {
     label: "Doesn't match",
     tone: "red",
-    help: "The identifier points to a work whose title, author or year differ from the reference.",
+    help: "The matching record's title, authors or year differ from the reference. Check for errors in the reference.",
   },
   found_by_search: {
     label: "Found by title",

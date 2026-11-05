@@ -84,7 +84,7 @@ Runs are processed one at a time, which respects arXiv's one-connection rule. Th
 
 ```bash
 python examples/demo_offline.py --signoff   # mocked APIs and a scripted stand-in model
-pytest -q                                   # 51 tests (engine, API, converter)
+pytest -q                                   # 62 tests (engine, API, converter)
 ```
 
 ## Converting articles to Markdown
@@ -120,6 +120,20 @@ rra signoff runs/<run-id> --reviewer "Efe A" --decision approve_with_changes \
 - arXiv requests are spaced at least 3 seconds apart, one at a time, as the [arXiv API terms of use](https://info.arxiv.org/help/api/tou.html) require. Cached responses are not throttled, so re-runs are fast.
 
 Each run writes `runs/<run-id>/` containing `report.html`, `report.json` and `audit.jsonl`. Checkpoints for all runs are stored in `runs/checkpoints.sqlite`.
+
+## Rate limits and API keys
+
+The databases limit how fast and how much you can query. The checker spaces its requests, retries after a rate limit (`429`) or a temporary server error, and gives up straight away if the limit won't reset for a while. In that case it carries on with the other databases. A reference is only marked *couldn't check* if no database could answer.
+
+OpenAlex gives each user a small free daily budget, which a long reference list can use up. A free API key raises the budget. See the [OpenAlex authentication docs](https://developers.openalex.org/api-reference/authentication). Set the key, and optionally a contact email for Crossref's polite pool, before starting the server:
+
+```bat
+set OPENALEX_API_KEY=your-key
+set RRA_MAILTO=you@example.org
+rra serve
+```
+
+Use `setx` instead of `set` to keep the values for future terminals. The key is added to requests only as they're sent. It is never written to the cache or the audit log.
 
 ## Sources outside the scholarly databases
 

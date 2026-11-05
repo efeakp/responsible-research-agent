@@ -86,7 +86,7 @@ def test_local_and_private_links_are_never_fetched(tmp_path, monkeypatch):
         ref = parse_references(f"1. Ollama (2024). Local service. {url}")[0]
         ref.title = None
         # search APIs are also refused above, so stub them for this test
-        monkeypatch.setattr("rra.existence._search", lambda h, r: (None, None))
+        monkeypatch.setattr("rra.existence._search", lambda h, r: (None, None, []))
         assert verify_reference(http, audit, ref).verdict == V.UNCHECKED
     monkeypatch.setattr(rra.http, "_resolve", lambda host: ["10.1.2.3"])
     ref = parse_references("1. Intranet (2024). Internal page. https://intranet.example.com/x")[0]
@@ -123,3 +123,110 @@ def test_claim_against_web_source_says_check_by_hand(check):
     r = check("DESNZ (2023). Powering up Britain. https://www.gov.uk/government/publications/powering-up-britain")
     s = HeuristicChecker().check(Claim(id="C1", text="The UK will do X [1].", cited_keys=["1"]), "1", r.record)
     assert s.verdict.value == "insufficient_evidence" and "Open the link" in s.rationale
+
+
+# ---------- rate limits ----------
+
+def _client(tmp_path, handler, monkeypatch=None):
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    return CachedClient(tmp_path / "cache", audit, transport=httpx.MockTransport(handler)), audit
+
+
+def test_429_is_retried_with_backoff(tmp_path, monkeypatch):
+    import rra.http as h
+    waits, calls = [], []
+    monkeypatch.setattr(h, "_sleep", waits.append)
+
+    def handler(req):
+        calls.append(1)
+        if len(calls) < 3:
+            return httpx.Response(429, headers={"retry-after": "2"})
+        return httpx.Response(200, json={"results": []})
+    http, audit = _client(tmp_path, handler)
+    status, _ = http.get("https://api.openalex.org/works", params={"search": "x"})
+    assert status == 200 and waits == [2.0, 2.0] and len(calls) == 3
+    assert (tmp_path / "audit.jsonl").read_text(encoding="utf-8").count("http_retry") == 2
+
+
+def test_daily_limit_is_not_waited_for(tmp_path, monkeypatch):
+    import rra.http as h
+    waits = []
+    monkeypatch.setattr(h, "_sleep", waits.append)
+    http, _ = _client(tmp_path, lambda req: httpx.Response(429, headers={"x-ratelimit-reset": "36000"}))
+    status, _ = http.get("https://api.openalex.org/works", params={"search": "x"})
+    assert status == 429 and waits == []
+
+
+def test_openalex_failure_falls_back_to_crossref(tmp_path):
+    item = {"DOI": "10.1111/x.1", "title": ["Using thematic analysis in psychology"],
+            "author": [{"family": "Braun"}, {"family": "Clarke"}], "issued": {"date-parts": [[2006]]}}
+
+    def handler(req):
+        if req.url.host == "api.openalex.org":
+            return httpx.Response(429, headers={"x-ratelimit-reset": "36000"})
+        if req.url.host == "api.crossref.org":
+            return httpx.Response(200, json={"message": {"items": [item]}})
+        return httpx.Response(404)
+    http, audit = _client(tmp_path, handler)
+    ref = parse_references("1. Braun, V. & Clarke, V. (2006) Using thematic analysis in psychology. "
+                           "Qualitative Research in Psychology, 3 (2), 77–101.")[0]
+    r = verify_reference(http, audit, ref)
+    assert r.verdict == V.FOUND_BY_SEARCH and r.record.source == "crossref"
+
+
+def test_all_databases_failing_is_unchecked_not_unverifiable(tmp_path):
+    http, audit = _client(tmp_path, lambda req: httpx.Response(503))
+    import rra.http as h
+    h.MAX_RETRIES, saved = 0, h.MAX_RETRIES
+    try:
+        ref = parse_references("1. Climate Change Committee (2023). Progress report. London: CCC.")[0]
+        r = verify_reference(http, audit, ref)
+    finally:
+        h.MAX_RETRIES = saved
+    assert r.verdict == V.UNCHECKED and "OpenAlex" in r.issues[0] and "Crossref" in r.issues[0]
+
+
+def test_openalex_key_is_sent_but_never_logged_or_cached(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENALEX_API_KEY", "secret-key-123")
+    seen = []
+
+    def handler(req):
+        seen.append(str(req.url))
+        return httpx.Response(200, json={"results": []})
+    http, _ = _client(tmp_path, handler)
+    http.get("https://api.openalex.org/works", params={"search": "x"})
+    assert "api_key=secret-key-123" in seen[0]
+    assert "secret-key-123" not in (tmp_path / "audit.jsonl").read_text(encoding="utf-8")
+    for f in (tmp_path / "cache").iterdir():
+        assert "secret-key-123" not in f.read_text(encoding="utf-8")
+
+
+# ---------- author matching ----------
+
+def test_corporate_author_is_not_a_mismatch():
+    from rra.existence import compare
+    from rra.models import SourceRecord
+    ref = parse_references("1. Intergovernmental Panel on Climate Change [IPCC] (2023) Climate change 2022 – "
+                           "impacts, adaptation and vulnerability. Cambridge University Press.")[0]
+    rec = SourceRecord(source="openalex", identifier="x", title="Climate Change 2022 – Impacts, Adaptation and "
+                       "Vulnerability", authors=["Change"], year=2023)
+    issues, _ = compare(ref, rec)
+    assert not any(i.startswith("First author") for i in issues)
+
+
+def test_misspelt_authors_on_title_match_show_as_mismatch(tmp_path):
+    item = {"DOI": "10.1000/lca.1", "title": ["LCA database creation: Current challenges and the way forward"],
+            "author": [{"family": "Ciroth"}, {"family": "Di Noi"}, {"family": "Burhan"}, {"family": "Srocka"}],
+            "issued": {"date-parts": [[2019]]}}
+
+    def handler(req):
+        if req.url.host == "api.crossref.org":
+            return httpx.Response(200, json={"message": {"items": [item]}})
+        return httpx.Response(200, json={"results": []})
+    http, audit = _client(tmp_path, handler)
+    ref = parse_references("1. Cirotha, A., Di Noia, C., Burhana, S. S. & Srockaa, M. (2019) LCA database "
+                           "creation: Current challenges and the way forward. Indonesian Journal of Life "
+                           "Cycle Assessment and Sustainability, 3 (2), 41–51.")[0]
+    r = verify_reference(http, audit, ref)
+    assert r.verdict == V.METADATA_MISMATCH
+    assert any("Cirotha" in i for i in r.issues) and r.record.identifier == "10.1000/lca.1"

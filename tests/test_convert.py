@@ -242,3 +242,37 @@ def test_author_affiliation_superscripts_are_not_citations(tmp_path):
     assert [c.cited_keys for c in claims] == [["1"]]                       # only the real citation
     assert "Ben Hart²" in conv.markdown and "Cara Lim³" in conv.markdown
     assert any("affiliation markers" in w for w in conv.warnings)
+
+
+def test_notation_superscripts_and_hidden_link_targets(tmp_path):
+    docx = pytest.importorskip("docx")
+    from docx.opc.constants import RELATIONSHIP_TYPE as RT
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    d = docx.Document()
+    d.add_paragraph("Abstract")
+    p = d.add_paragraph("The cluster emits CO")
+    for text in ["2", " and uses 40 kWh/m", "2", " of floor area, about 10", "6", " tonnes overall. Ports matter"]:
+        r = p.add_run(text)
+        r.font.superscript = text in ("2", "6")
+    r = p.add_run("1"); r.font.superscript = True
+    p.add_run(".")
+    d.add_heading("References", 1)
+    ref = d.add_paragraph("1. BSI (2011), PAS 2050, Available at: ")
+    rid = ref.part.relate_to("https://knowledge.bsigroup.com/products/pas-2050", RT.HYPERLINK, is_external=True)
+    h = OxmlElement("w:hyperlink"); h.set(qn("r:id"), rid)
+    run = OxmlElement("w:r"); t = OxmlElement("w:t"); t.text = "PAS 2050:2011 | BSI Knowledge"
+    run.append(t); h.append(run); ref._p.append(h)
+    ref.add_run(". [Accessed Jul 3, 2025].")
+    path = tmp_path / "notation.docx"
+    d.save(str(path))
+    md = convert_file(path).markdown
+    assert "CO² and uses 40 kWh/m² of floor area, about 10⁶ tonnes" in md
+    refs, claims = verifier_view(md)
+    assert [c.cited_keys for c in claims] == [["1"]]
+    assert refs[0].url == "https://knowledge.bsigroup.com/products/pas-2050"
+
+
+def test_unicode_notation_left_alone():
+    conv = to_markdown("Abstract\n\nIt emits CO² over 25 m² and 10⁶ t, as shown¹.\n\nReferences\n1. A. (2020). Title of it. J 1, 2-3.\n")
+    assert "CO² over 25 m² and 10⁶ t, as shown [1]." in conv.markdown

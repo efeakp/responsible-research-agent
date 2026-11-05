@@ -62,25 +62,46 @@ def compare(ref: Reference, rec: SourceRecord) -> tuple[list[str], Optional[floa
         issues.append(f"Year mismatch: reference says {ref.year}, record says {rec.year}")
     if ref.first_author and rec.authors:
         surnames = {_norm(a) for a in rec.authors if a}
-        if _norm(ref.first_author) not in surnames:
+        # the author part of the reference: everything before the year
+        segment = _norm(re.split(r"\(?\b(?:19|20)\d{2}[a-z]?\b", ref.raw, maxsplit=1)[0])
+        # corporate authors ("Intergovernmental Panel on Climate Change") are matched by any
+        # record author appearing as a whole word; a misspelt surname ("Cirotha") still fails
+        named = any(re.search(rf"\b{re.escape(a)}\b", segment) for a in surnames if a)
+        if _norm(ref.first_author) not in surnames and not named:
             issues.append(f"First author “{ref.first_author}” not among record authors "
                           f"({', '.join(rec.authors[:4])}{'…' if len(rec.authors) > 4 else ''})")
     return issues, sim
 
 
-def _search(http: CachedClient, ref: Reference) -> tuple[Optional[SourceRecord], Optional[float]]:
+LOOKUP_ERRORS = (httpx.HTTPError, sources.LookupError_, OfflineMiss)
+
+
+def _attempt(fn, errors: list[str], name: str):
+    """Run one database call; on failure record which database failed and carry on."""
+    try:
+        return fn()
+    except LOOKUP_ERRORS as e:
+        errors.append(f"{name} ({str(e)[:120]})")
+        return None
+
+
+def _search(http: CachedClient, ref: Reference) -> tuple[Optional[SourceRecord], Optional[float], list[str]]:
+    """Title search across OpenAlex, Crossref and arXiv. One database failing (e.g. a rate
+    limit) doesn't stop the others. Returns (best match, similarity, failed databases)."""
     query = ref.title or ref.raw
-    best, best_sim = None, 0.0
-    candidates = sources.openalex_search(http, query) + sources.crossref_search(http, ref.raw)
-    if ref.title and not any((title_similarity(ref.title, c.title) or 0) >= SEARCH_ACCEPT
-                             for c in candidates):
+    errors: list[str] = []
+    candidates: list[SourceRecord] = []
+    candidates += _attempt(lambda: sources.openalex_search(http, query), errors, "OpenAlex") or []
+    candidates += _attempt(lambda: sources.crossref_search(http, ref.raw), errors, "Crossref") or []
+    if ref.title and not any((title_similarity(ref.title, c.title) or 0) >= SEARCH_ACCEPT for c in candidates):
         # preprints are often missing from the general indexes' top hits; ask arXiv directly
-        candidates += sources.arxiv_search(http, ref.title)
+        candidates += _attempt(lambda: sources.arxiv_search(http, ref.title), errors, "arXiv") or []
+    best, best_sim = None, 0.0
     for rec in candidates:
         sim = title_similarity(ref.title or ref.raw, rec.title) or 0.0
         if sim > best_sim:
             best, best_sim = rec, sim
-    return best, (round(best_sim, 3) if best else None)
+    return best, (round(best_sim, 3) if best else None), errors
 
 
 # A reference formatted like a journal or conference paper (volume and pages, or a
@@ -174,8 +195,15 @@ def _check_link(http: CachedClient, ref: Reference) -> ExistenceResult:
 
 def _verify(http: CachedClient, ref: Reference) -> ExistenceResult:
     if ref.doi:
-        rec = _merge(sources.crossref_by_doi(http, ref.doi), sources.openalex_by_doi(http, ref.doi))
-        return _judge(ref, rec) if rec else _doi_outside_crossref(http, ref)
+        errors: list[str] = []
+        cr = _attempt(lambda: sources.crossref_by_doi(http, ref.doi), errors, "Crossref")
+        oa = _attempt(lambda: sources.openalex_by_doi(http, ref.doi), errors, "OpenAlex")
+        rec = _merge(cr, oa)
+        if rec:
+            return _judge(ref, rec)
+        if len(errors) == 2:     # neither answered: we can't say anything
+            raise sources.LookupError_("Crossref and OpenAlex both failed: " + "; ".join(errors))
+        return _doi_outside_crossref(http, ref)
     if ref.arxiv_id:
         rec = sources.arxiv_by_id(http, ref.arxiv_id)
         return _judge(ref, rec) if rec else ExistenceResult(
@@ -185,16 +213,24 @@ def _verify(http: CachedClient, ref: Reference) -> ExistenceResult:
         return _judge(ref, rec) if rec else ExistenceResult(
             reference=ref, verdict=ExistenceVerdict.NOT_FOUND, issues=["This PubMed ID doesn't exist"])
 
-    rec, sim = _search(http, ref)
+    rec, sim, errors = _search(http, ref)
     if rec is not None and (sim or 0) >= SEARCH_ACCEPT:
         res = _judge(ref, rec)
-        if res.verdict != ExistenceVerdict.RETRACTED:
+        if res.verdict == ExistenceVerdict.VERIFIED:
             res.verdict = ExistenceVerdict.FOUND_BY_SEARCH
         res.issues.insert(0, "No DOI, arXiv ID or PMID in the reference; matched by title search. "
                              "Add the identifier")
         return res
-    if ref.url:
-        return _check_link(http, ref)
+    link = _check_link(http, ref) if ref.url else None
+    if errors:
+        # Some databases couldn't be searched, so "not found" or "can't verify" would be unfounded.
+        if link is not None and link.verdict == ExistenceVerdict.EXISTS_UNINDEXED:
+            link.issues.append("Not every database could be searched: " + "; ".join(errors))
+            return link
+        return ExistenceResult(reference=ref, verdict=ExistenceVerdict.UNCHECKED, issues=[
+            "Couldn't search " + "; ".join(errors) + ". Not treated as missing. Run the check again later"])
+    if link is not None:
+        return link
     if looks_like_article(ref.raw):
         return ExistenceResult(reference=ref, verdict=ExistenceVerdict.NOT_FOUND, title_similarity=sim, issues=[
             "Formatted like a journal or conference paper, but no database has it, and it has no DOI "

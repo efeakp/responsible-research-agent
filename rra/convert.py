@@ -35,6 +35,19 @@ SUPERSCRIPTS = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹", "0123456789")
 SUP_RUN = re.compile(r"(?<=[A-Za-z\)\].,;:])([⁰¹²³⁴⁵⁶⁷⁸⁹]+(?:[,–\-‒][⁰¹²³⁴⁵⁶⁷⁸⁹]+)*)")
 
 
+# A superscript straight after one of these is notation, not a citation: chemical formulas
+# (CO², CH⁴ typed as superscript), units (m², kWh/m²) and powers of ten (10⁶).
+_ELEMENT = r"(?:Cl|Br|Na|Ca|Mg|Fe|Si|Al|Hg|Pb|Zn|Cu|C|H|O|N|S|F|P|K)"
+NOTATION_BEFORE = re.compile(
+    r"(?:(?<![A-Za-z])" + _ELEMENT + r"(?:\d*" + _ELEMENT + r"){0,3}\d*"     # CO, CH, SO, HFC, N2O
+    r"|(?:^|[\s/·(\d])(?:m|cm|mm|km|ft|kg|g|t|l|kWh|MWh|W|kW|J|MJ|GJ|Pa|s|h|yr)"  # units
+    r"|(?:^|[\s×x(])10)$")
+
+
+def is_notation(before: str) -> bool:
+    return bool(NOTATION_BEFORE.search(before))
+
+
 class ConversionUnavailable(RuntimeError):
     """The file type isn't supported, or the library it needs isn't installed."""
 
@@ -74,6 +87,21 @@ def _docx_runs(paragraph) -> list[tuple[str, bool]]:
     skip = {qn("w:del"), qn("w:moveFrom"), qn("w:txbxContent")}
     root = paragraph._p
     pieces: list[tuple[str, bool]] = []
+    # Links whose visible text isn't the address ("BSI Knowledge"): remember the target URL
+    # so it can be written out after the text, where the link check will find it.
+    link_after: dict[int, str] = {}
+    for h in root.iter(qn("w:hyperlink")):
+        rid = h.get(qn("r:id"))
+        runs = list(h.iter(qn("w:r")))
+        if not rid or not runs:
+            continue
+        try:
+            url = paragraph.part.rels[rid].target_ref
+        except (KeyError, AttributeError):
+            continue
+        shown = "".join(Run(r, paragraph).text for r in runs)
+        if url.lower().startswith(("http://", "https://")) and url.rstrip("/") not in shown:
+            link_after[id(runs[-1])] = url
     for r in root.iter(qn("w:r")):
         node, skipped = r.getparent(), False
         while node is not None and node is not root:
@@ -86,6 +114,8 @@ def _docx_runs(paragraph) -> list[tuple[str, bool]]:
         run = Run(r, paragraph)
         if run.text:
             pieces.append((run.text, bool(run.font.superscript)))
+        if id(r) in link_after:
+            pieces.append((f" {link_after[id(r)]} ", False))
     return pieces
 
 
@@ -108,8 +138,11 @@ def _docx(path: Path) -> tuple[str, str]:
         parts = []
         for text, sup in merged:
             if sup and re.fullmatch(r"[\d,\-–\s]+", text) and re.search(r"\d", text):
-                digits = re.sub(r"\s+", "", text).strip(",")
-                text = "[" + digits + "]"                     # superscript citation numbers become [n]
+                if is_notation("".join(parts)):
+                    text = text.translate(_TO_SUP)                # CO², m², 10⁶: keep as superscript
+                else:
+                    digits = re.sub(r"\s+", "", text).strip(",")
+                    text = "[" + digits + "]"                     # superscript citation numbers become [n]
             parts.append(text)
         text = "".join(parts).strip()
         if not text:
@@ -170,7 +203,11 @@ def _clean_lines(text: str) -> list[str]:
 
 
 def _superscripts_to_brackets(text: str) -> str:
-    return SUP_RUN.sub(lambda m: f" [{m.group(1).translate(SUPERSCRIPTS).replace('-', '–')}]", text)
+    def repl(m: re.Match) -> str:
+        if is_notation(m.string[:m.start()]):
+            return m.group(0)
+        return f" [{m.group(1).translate(SUPERSCRIPTS).replace('-', '–')}]"
+    return SUP_RUN.sub(repl, text)
 
 
 def _normalise_citations(body: str) -> str:
