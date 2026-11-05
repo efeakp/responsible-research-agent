@@ -185,6 +185,36 @@ def _normalise_citations(body: str) -> str:
 HEADING_BOLD = re.compile(r"^(#{1,6})\s*(?:\*\*|__)(.+?)(?:\*\*|__)\s*$")
 
 
+# The first line of the paper proper. Everything above it is the title and author block,
+# where superscript numbers mark affiliations, not citations.
+FRONT_MATTER_END = re.compile(
+    r"^\s{0,3}(?:#{1,6}\s*)?(?:\*\*|__)?\s*(?:\d+(?:\.\d+)*[.)]?\s+)?"
+    r"(abstract|introduction|keywords?|key\s+words|summary|executive\s+summary|background|highlights)\b",
+    re.IGNORECASE)
+EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+_TO_SUP = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
+
+
+def _demote_affiliation_markers(lines: list[str]) -> tuple[list[str], int]:
+    """Turn [n] back into superscript digits in the title/author block (before Abstract or
+    Introduction) and on any line with an email address, where they are affiliation
+    markers. Returns (lines, number demoted)."""
+    end = next((i for i, l in enumerate(lines) if FRONT_MATTER_END.match(l)), 0)
+    count = 0
+
+    def demote(m: re.Match) -> str:
+        nonlocal count
+        count += 1
+        return m.group(1).replace(" ", "").translate(_TO_SUP)
+
+    out = []
+    for i, line in enumerate(lines):
+        if i < end or EMAIL_RE.search(line):
+            line = re.sub(r"\s?\[(\d+(?:\s*,\s*\d+)*)\]", demote, line)
+        out.append(line)
+    return out, count
+
+
 def _join_paragraphs(lines: list[str]) -> str:
     """Re-flow hard-wrapped lines into paragraphs; keep headings and blank lines."""
     out, buf = [], []
@@ -260,7 +290,11 @@ def to_markdown(raw: str, extractor: str = "text") -> Conversion:
                                  "that were split or merged.")
     numbered = [f"{k if already else i + 1}. {t}" for i, (k, t) in enumerate(entries)]
 
-    body = _join_paragraphs([_normalise_citations(l) for l in body_lines])
+    body_lines, demoted = _demote_affiliation_markers([_normalise_citations(l) for l in body_lines])
+    if demoted:
+        conv.warnings.append(f"{demoted} superscript number(s) in the title and author block were treated as "
+                             "affiliation markers, not citations.")
+    body = _join_paragraphs(body_lines)
     cites = re.findall(r"\[(\d[\d,\s\-–]*)\]", body)
     if not cites:
         conv.warnings.append("No numbered citations like [1] were found, so only the reference list can be "

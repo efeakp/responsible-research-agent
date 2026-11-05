@@ -214,3 +214,31 @@ def test_docx_keeps_hyperlinks_fields_and_split_superscripts(tmp_path):
     refs, claims = verifier_view(md)
     assert refs[0].doi == "10.1038/nature14539"
     assert [c.cited_keys for c in claims] == [["1"], ["2", "3"], ["1"]]
+
+
+def test_author_affiliation_superscripts_are_not_citations(tmp_path):
+    docx = pytest.importorskip("docx")
+    d = docx.Document()
+    d.add_paragraph("Supply chain resilience in UK ports", style="Title")
+    p = d.add_paragraph("Ada Okafor")
+    r = p.add_run("1*"); r.font.superscript = True
+    p.add_run(", Ben Hart")
+    r = p.add_run("2"); r.font.superscript = True
+    p.add_run(", and Cara Lim")
+    r = p.add_run("3"); r.font.superscript = True
+    p = d.add_paragraph("")
+    r = p.add_run("2"); r.font.superscript = True
+    p.add_run("University of Hull, UK, b.hart@example.ac.uk")
+    d.add_paragraph("Abstract")
+    p = d.add_paragraph("Ports are critical infrastructure")
+    r = p.add_run("1"); r.font.superscript = True
+    p.add_run(".")
+    d.add_heading("References", 1)
+    d.add_paragraph("1. Smith J. (2020). Port resilience. Maritime Policy 4(2), 1–10. doi:10.1000/x")
+    path = tmp_path / "authors.docx"
+    d.save(str(path))
+    conv = convert_file(path)
+    refs, claims = verifier_view(conv.markdown)
+    assert [c.cited_keys for c in claims] == [["1"]]                       # only the real citation
+    assert "Ben Hart²" in conv.markdown and "Cara Lim³" in conv.markdown
+    assert any("affiliation markers" in w for w in conv.warnings)
