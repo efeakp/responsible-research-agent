@@ -84,7 +84,7 @@ Runs are processed one at a time, which respects arXiv's one-connection rule. Th
 
 ```bash
 python examples/demo_offline.py --signoff   # mocked APIs and a scripted stand-in model
-pytest -q                                   # 67 tests (engine, API, converter)
+pytest -q                                   # 79 tests (engine, API, converter)
 ```
 
 ## Converting articles to Markdown

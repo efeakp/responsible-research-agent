@@ -38,6 +38,10 @@ class Reference(BaseModel):
     title: Optional[str] = None
     first_author: Optional[str] = None
     year: Optional[int] = None
+    volume: Optional[str] = None
+    issue: Optional[str] = None
+    first_page: Optional[str] = None
+    last_page: Optional[str] = None
 
 
 class SourceRecord(BaseModel):
@@ -50,6 +54,10 @@ class SourceRecord(BaseModel):
     abstract: Optional[str] = None
     is_retracted: bool = False
     url: Optional[str] = None
+    volume: Optional[str] = None
+    issue: Optional[str] = None
+    first_page: Optional[str] = None
+    last_page: Optional[str] = None
 
 
 class ExistenceResult(BaseModel):
@@ -64,6 +72,8 @@ class Claim(BaseModel):
     id: str
     text: str                     # the sentence as written
     cited_keys: list[str]
+    unresolved: list[str] = Field(default_factory=list)  # author–year citations with no single match
+    plain: Optional[str] = None   # the sentence without its citations, for the support check
 
 
 class SupportResult(BaseModel):
@@ -86,5 +96,6 @@ class RunReport(BaseModel):
     references: list[ExistenceResult] = Field(default_factory=list)
     claims: list[Claim] = Field(default_factory=list)
     support: list[SupportResult] = Field(default_factory=list)
-    unresolved_citations: list[str] = Field(default_factory=list)  # cited keys with no reference entry
+    unresolved_citations: list[str] = Field(default_factory=list)  # cited keys / author–year citations with no reference
+    citation_style: str = "numeric"   # numeric | author_year | none
     uncited_references: list[str] = Field(default_factory=list)

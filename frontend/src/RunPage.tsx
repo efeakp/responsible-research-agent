@@ -56,6 +56,9 @@ export default function RunPage({ id }: { id: string }) {
             <span className={`status ${s.tone} ${s.live ? "live" : ""}`}>{s.label}</span>
             <span>Started {when(run.created_at)}</span>
             <span>{run.mode === "ollama" ? `Claims checked by ${run.model}` : "Claims checked without a model"}</span>
+            {run.citation_style && run.citation_style !== "none" && (
+              <span>{run.citation_style === "author_year" ? "Author–year citations" : "Numbered citations"}</span>
+            )}
           </div>
           {run.source && (
             <p className="meta source-line">
@@ -150,6 +153,7 @@ function Results({ run, events, onSigned }: { run: RunDetail; events: AuditEvent
   const unresolved = new Set(run.unresolved_citations);
   const claimNeedsAttention = (c: Claim) =>
     c.cited_keys.some((k) => unresolved.has(k)) ||
+    (c.unresolved?.length ?? 0) > 0 ||
     (supportByClaim[c.id] ?? []).some((s) => s.verdict !== "supported");
 
   const refs = onlyAttention ? run.existence.filter((e) => e.verdict !== "verified") : run.existence;
@@ -190,7 +194,16 @@ function Results({ run, events, onSigned }: { run: RunDetail; events: AuditEvent
             <div className="sheet">
               {run.unresolved_citations.length > 0 && (
                 <div className="integrity">
-                  Cited in the text but missing from the reference list: [{run.unresolved_citations.join("], [")}]
+                  Citations that don't match the reference list:
+                  {run.unresolved_citations.every((u) => /^\d+$/.test(u)) ? (
+                    <> [{run.unresolved_citations.join("], [")}]</>
+                  ) : (
+                    <ul className="unresolved-list">
+                      {run.unresolved_citations.map((u) => (
+                        <li key={u}>{/^\d+$/.test(u) ? `[${u}]: no entry in the reference list` : u}</li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
               )}
               {run.uncited_references.length > 0 && run.claims.length > 0 && (
@@ -230,8 +243,13 @@ function Results({ run, events, onSigned }: { run: RunDetail; events: AuditEvent
               </section>
 
               <section className="sheet-section">
-                <h2>References</h2>
-                <p className="small">Looked up in Crossref, OpenAlex, arXiv and PubMed.</p>
+                <div className="refs-head">
+                  <div>
+                    <h2>References</h2>
+                    <p className="small">Looked up in Crossref, OpenAlex, arXiv and PubMed.</p>
+                  </div>
+                  <CopyDois existence={run.existence} />
+                </div>
                 {refs.length === 0 && <p className="small">Every reference was verified.</p>}
                 {refs.map((e) => (
                   <ReferenceEntry
@@ -259,10 +277,16 @@ function Results({ run, events, onSigned }: { run: RunDetail; events: AuditEvent
 }
 
 function CitedText({ text }: { text: string }) {
-  const parts = text.split(/(\[\d+(?:\s*[-–,]\s*\d+)*\])/g);
+  const parts = text.split(/(\[\d+(?:\s*[-–,]\s*\d+)*\]|\((?:[^()]|\([^()]*\))*?\b(?:19|20)\d{2}[a-z]?\b(?:[^()]|\([^()]*\))*?\))/g);
   return (
     <>
-      {parts.map((p, i) => (/^\[\d/.test(p) ? <span key={i} className="cite">{p}</span> : <Fragment key={i}>{p}</Fragment>))}
+      {parts.map((p, i) =>
+        /^\[\d/.test(p) || /^\(.*\b(?:19|20)\d{2}[a-z]?\b.*\)$/.test(p) ? (
+          <span key={i} className="cite">{p}</span>
+        ) : (
+          <Fragment key={i}>{p}</Fragment>
+        ),
+      )}
     </>
   );
 }
@@ -368,6 +392,15 @@ function ClaimEntry(props: {
             <span className="sub">not in the reference list</span>
           </div>
         ))}
+        {(claim.unresolved ?? []).map((u) => {
+          const [label, reason] = u.split(/:\s(.+)/);
+          return (
+            <div key={u} className="mark red" style={{ cursor: "default" }}>
+              <span className="lbl">{reason ? reason.charAt(0).toUpperCase() + reason.slice(1) : "No reference"}</span>
+              <span className="sub">{label}</span>
+            </div>
+          );
+        })}
       </div>
       {openPair && (
         <div className="detail">
@@ -428,6 +461,55 @@ function ReferenceEntry(props: {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/* ---------- DOIs the checker found ---------- */
+
+function foundDois(existence: Existence[]) {
+  return existence
+    .filter((e) => !e.reference.doi && e.record && /^10\./.test(e.record.identifier))
+    .map((e) => {
+      const r = e.reference;
+      const who = r.first_author ?? "";
+      const note = e.verdict === "metadata_mismatch" ? " (details differ: check before using)" : "";
+      return `[${r.key}] ${who} (${r.year ?? "n.d."}): https://doi.org/${e.record!.identifier}${note}`;
+    });
+}
+
+function CopyDois({ existence }: { existence: Existence[] }) {
+  const lines = foundDois(existence);
+  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
+  if (lines.length === 0) return null;
+  const copy = async () => {
+    const text = lines.join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      setState("copied");
+    } catch {
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand("copy");
+        ta.remove();
+        setState(ok ? "copied" : "failed");
+      } catch {
+        setState("failed");
+      }
+    }
+    setTimeout(() => setState("idle"), 2500);
+  };
+  return (
+    <div className="copy-dois">
+      <button className="btn ghost" onClick={copy} title={lines.join("\n")}>
+        {state === "copied" ? "Copied" : `Copy ${lines.length} DOI${lines.length === 1 ? "" : "s"} found`}
+      </button>
+      <span className="small" aria-live="polite">
+        {state === "failed" ? "Couldn't copy. Use the printable report." : "For references that don't give one"}
+      </span>
     </div>
   );
 }

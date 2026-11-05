@@ -153,9 +153,11 @@ def test_warns_when_no_references_heading():
     assert any("No References heading" in w for w in conv.warnings)
 
 
-def test_warns_on_author_year_style():
+def test_author_year_is_recognised_and_no_citations_warns():
     conv = to_markdown("A claim (Smith, 2020).\n\nReferences\n\nSmith, J. (2020). Title. J.\n")
-    assert any("Author–year" in w for w in conv.warnings)
+    assert not any("No citations were found" in w for w in conv.warnings)
+    conv = to_markdown("A claim with no citation.\n\nReferences\n\nSmith, J. (2020). Title. J.\n")
+    assert any("No citations were found" in w for w in conv.warnings)
 
 
 def test_cli_does_not_overwrite(tmp_path, capsys):

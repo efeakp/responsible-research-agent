@@ -48,6 +48,13 @@ def _check(status: int, url: str) -> None:
 
 # ---------- Crossref ----------
 
+def _pages(page) -> tuple[Optional[str], Optional[str]]:
+    if not page:
+        return None, None
+    parts = re.split(r"\s*[-–—]\s*", str(page).strip(), maxsplit=1)
+    return parts[0] or None, (parts[1] if len(parts) > 1 and parts[1] else None)
+
+
 def _crossref_record(msg: dict) -> SourceRecord:
     titles = msg.get("title") or []
     year = None
@@ -58,10 +65,16 @@ def _crossref_record(msg: dict) -> SourceRecord:
             break
     retracted = any((u.get("type") or "").lower() == "retraction"
                     for u in msg.get("updated-by", []) or [])
+    title = titles[0] if titles else None
+    subtitles = msg.get("subtitle") or []
+    if title and subtitles and subtitles[0] and subtitles[0].lower() not in title.lower():
+        title = f"{title}: {subtitles[0]}"           # books often keep the subtitle separately
+    first, last = _pages(msg.get("page") or msg.get("article-number"))
     return SourceRecord(
         source="crossref",
         identifier=(msg.get("DOI") or "").lower(),
-        title=titles[0] if titles else None,
+        title=title,
+        volume=msg.get("volume"), issue=msg.get("issue"), first_page=first, last_page=last,
         authors=[a.get("family") or a.get("name") or "" for a in msg.get("author", []) or []],
         year=year,
         abstract=_strip_tags(msg.get("abstract")),
@@ -99,8 +112,11 @@ def _openalex_record(w: dict) -> SourceRecord:
         name = (a.get("author") or {}).get("display_name") or ""
         authors.append(name.split()[-1] if name else "")
     doi = (w.get("doi") or "").replace("https://doi.org/", "").lower()
+    biblio = w.get("biblio") or {}
     return SourceRecord(
         source="openalex",
+        volume=biblio.get("volume"), issue=biblio.get("issue"),
+        first_page=biblio.get("first_page"), last_page=biblio.get("last_page"),
         identifier=doi or (w.get("id") or ""),
         title=w.get("title") or w.get("display_name"),
         authors=authors,

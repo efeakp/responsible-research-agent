@@ -37,6 +37,7 @@ export interface Summary {
   missing_citations: string[];
   uncited_references: string[];
   has_reference_heading: boolean;
+  citation_style?: "numeric" | "author_year" | "none";
 }
 
 export interface ConversionOut {
@@ -80,6 +81,10 @@ export interface SourceRecord {
   abstract?: string | null;
   is_retracted: boolean;
   url?: string | null;
+  volume?: string | null;
+  issue?: string | null;
+  first_page?: string | null;
+  last_page?: string | null;
 }
 
 export interface Existence {
@@ -94,6 +99,8 @@ export interface Claim {
   id: string;
   text: string;
   cited_keys: string[];
+  unresolved?: string[];
+  plain?: string | null;
 }
 
 export interface Support {
@@ -127,6 +134,7 @@ export interface RunDetail extends RunSummary {
   support: Support[];
   unresolved_citations: string[];
   uncited_references: string[];
+  citation_style?: "numeric" | "author_year" | "none";
   pending: { references_needing_attention: string[]; claim_pairs_needing_attention: string[] } | null;
   resolutions: HumanResolution[];
   signoffs: Signoff[];

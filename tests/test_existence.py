@@ -244,3 +244,61 @@ def test_openalex_key_is_redacted_from_network_errors(tmp_path, monkeypatch):
     assert r.verdict == V.UNCHECKED
     assert "secret-key-123" not in " ".join(r.issues)
     assert "secret-key-123" not in (tmp_path / "audit.jsonl").read_text(encoding="utf-8")
+
+
+# ---------- volume, issue, pages; titles ----------
+
+def _crossref_only(tmp_path, item):
+    def handler(req):
+        if req.url.host == "api.crossref.org":
+            return httpx.Response(200, json={"message": {"items": [item]}})
+        return httpx.Response(200, json={"results": []})
+    return _client(tmp_path, handler)
+
+
+def test_volume_given_as_issue_is_flagged(tmp_path):
+    item = {"DOI": "10.1021/es901643a", "title": ["Categorization of Scope 3 Emissions for Streamlined "
+            "Enterprise Carbon Footprinting"], "author": [{"family": "Huang"}, {"family": "Weber"},
+            {"family": "Matthews"}], "issued": {"date-parts": [[2009]]}, "volume": "43", "issue": "22",
+            "page": "8509-8515"}
+    http, audit = _crossref_only(tmp_path, item)
+    ref = parse_references("1. Huang, Y. A., Weber, C. L. & Matthews, H. S. (2009) Categorization of scope 3 "
+                           "emissions for streamlined enterprise carbon foot printing. Environ. Sci. Technol. "
+                           "22, 8509–8515.")[0]
+    r = verify_reference(http, audit, ref)
+    assert r.verdict == V.METADATA_MISMATCH
+    assert any("looks like the issue number" in i for i in r.issues)
+
+
+def test_matching_volume_and_pages_stay_found(tmp_path):
+    item = {"DOI": "10.1002/bse.723", "title": ["Modeling the Impacts of Corporate Commitment on Climate Change"],
+            "author": [{"family": "Boiral"}, {"family": "Henri"}, {"family": "Talbot"}],
+            "issued": {"date-parts": [[2012]]}, "volume": "21", "issue": "8", "page": "495-516"}
+    http, audit = _crossref_only(tmp_path, item)
+    ref = parse_references("1. Boiral, O., Henri, J. & Talbot, D. (2012) Modeling the impacts of corporate "
+                           "commitment on climate change. Business Strategy and the Environment, 21 (8), 495–516.")[0]
+    assert verify_reference(http, audit, ref).verdict == V.FOUND_BY_SEARCH
+
+
+def test_book_subtitle_from_crossref_allows_match(tmp_path):
+    item = {"DOI": "10.4324/9781315134543", "title": ["The Research Act"],
+            "subtitle": ["A Theoretical Introduction to Sociological Methods"],
+            "author": [{"family": "Denzin"}], "issued": {"date-parts": [[2017]]}}
+    http, audit = _crossref_only(tmp_path, item)
+    ref = parse_references("1. Denzin, N. K. (2017) The research act: A theoretical introduction to "
+                           "sociological methods Routledge.")[0]
+    r = verify_reference(http, audit, ref)
+    assert r.verdict == V.FOUND_BY_SEARCH and r.record.identifier == "10.4324/9781315134543"
+
+
+def test_short_title_inside_page_title_is_a_match(tmp_path):
+    def handler(req):
+        if req.url.host == "knowledge.bsigroup.com":
+            return httpx.Response(200, headers={"content-type": "text/html"},
+                                  content=b"<title>PAS 2050:2011 | 30 Sep 2011 | BSI Knowledge</title>")
+        return httpx.Response(200, json={"results": [], "message": {"items": []}})
+    http, audit = _client(tmp_path, handler)
+    ref = parse_references("1. BSI (2011), PAS 2050, Available at: PAS 2050:2011 | 30 Sep 2011 | BSI Knowledge "
+                           "https://knowledge.bsigroup.com/products/pas-2050. [Accessed Jul 3, 2025].")[0]
+    r = verify_reference(http, audit, ref)
+    assert r.verdict == V.EXISTS_UNINDEXED and not any("doesn't match" in i for i in r.issues)

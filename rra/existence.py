@@ -48,6 +48,9 @@ def _merge(primary: Optional[SourceRecord], secondary: Optional[SourceRecord]) -
         merged.abstract = secondary.abstract
         merged.source = f"{primary.source}+{secondary.source}"
     merged.is_retracted = primary.is_retracted or secondary.is_retracted
+    for f in ("volume", "issue", "first_page", "last_page"):
+        if not getattr(merged, f) and getattr(secondary, f):
+            setattr(merged, f, getattr(secondary, f))
     return merged
 
 
@@ -70,7 +73,32 @@ def compare(ref: Reference, rec: SourceRecord) -> tuple[list[str], Optional[floa
         if _norm(ref.first_author) not in surnames and not named:
             issues.append(f"First author “{ref.first_author}” not among record authors "
                           f"({', '.join(rec.authors[:4])}{'…' if len(rec.authors) > 4 else ''})")
+    issues += _volume_page_issues(ref, rec)
     return issues, sim
+
+
+def _num(v: Optional[str]) -> str:
+    return re.sub(r"^0+(?=\d)", "", str(v).strip().lower()) if v else ""
+
+
+def _volume_page_issues(ref: Reference, rec: SourceRecord) -> list[str]:
+    out = []
+    rv, cv = _num(ref.volume), _num(rec.volume)
+    if rv and cv and rv != cv:
+        if rv == _num(rec.issue):
+            out.append(f"Volume mismatch: the reference gives {ref.volume} as the volume, but the record has "
+                       f"volume {rec.volume}, issue {rec.issue}. {ref.volume} looks like the issue number")
+        else:
+            out.append(f"Volume mismatch: reference says {ref.volume}, record says {rec.volume}")
+    rp, cp = _num(ref.first_page), _num(rec.first_page)
+    if rp and cp and rp != cp:
+        shown = lambda a, b: f"{a}–{b}" if b else f"{a}"
+        out.append(f"Pages mismatch: reference says {shown(ref.first_page, ref.last_page)}, "
+                   f"record says {shown(rec.first_page, rec.last_page)}")
+    ri, ci = _num(ref.issue), _num(rec.issue)
+    if ri and ci and ri != ci and ri.isdigit() and ci.isdigit() and not out:
+        out.append(f"Issue differs: reference says {ref.issue}, record says {rec.issue} (minor)")
+    return out
 
 
 LOOKUP_ERRORS = (httpx.HTTPError, sources.LookupError_, OfflineMiss)
@@ -125,7 +153,8 @@ def _judge(ref: Reference, rec: SourceRecord) -> ExistenceResult:
     if rec.is_retracted:
         verdict = ExistenceVerdict.RETRACTED
         issues.insert(0, "Work is flagged as RETRACTED")
-    elif any(i.startswith(("Title mismatch", "Year mismatch", "First author")) for i in issues):
+    elif any(i.startswith(("Title mismatch", "Year mismatch", "First author", "Volume mismatch", "Pages mismatch"))
+             for i in issues):
         verdict = ExistenceVerdict.METADATA_MISMATCH
     else:
         verdict = ExistenceVerdict.VERIFIED
@@ -180,6 +209,10 @@ def _check_link(http: CachedClient, ref: Reference) -> ExistenceResult:
     sim = None
     if ref.title and p.get("title"):
         sim = max(title_similarity(ref.title, seg) or 0.0 for seg in _segments(p["title"]))
+        # a short document title inside a longer page title ("PAS 2050" in "PAS 2050:2011 | BSI")
+        nt, np_ = _norm(ref.title), _norm(p["title"])
+        if len(nt) >= 6 and re.search(rf"\b{re.escape(nt)}\b", np_):
+            sim = max(sim, 0.9)
     issues = [f"The link works ({kind}). The source isn't in Crossref, OpenAlex or arXiv, "
               "which is normal for reports, policy documents and web pages"]
     if p.get("title"):

@@ -331,11 +331,14 @@ function Preview(props: { conversion: ConversionOut; mode: "ollama" | "heuristic
         </div>
         <div>
           <b>{summary.claims}</b>
-          <span>sentences with citations</span>
+          <span>
+            sentences with citations
+            {summary.citation_style === "author_year" ? " (author–year)" : summary.citation_style === "numeric" ? " (numbered)" : ""}
+          </span>
         </div>
         <div className={summary.missing_citations.length ? "red" : ""}>
           <b>{summary.missing_citations.length}</b>
-          <span>citations with no reference</span>
+          <span>citations that don't match</span>
         </div>
       </div>
 
@@ -349,14 +352,18 @@ function Preview(props: { conversion: ConversionOut; mode: "ollama" | "heuristic
           )}
           {referencesOnly && !converterSaidSo && (
             <li>
-              No numbered citations like [1] were found, so only the reference list will be checked. Author–year
-              citations such as (Smith, 2020) aren't supported yet.
+              No citations were found in the text, either numbered like [1] or author–year like (Smith, 2020)
+              matching the reference list, so only the reference list will be checked.
             </li>
           )}
           {summary.missing_citations.length > 0 && (
             <li>
-              Cited in the text but missing from the reference list: [{summary.missing_citations.slice(0, 12).join("], [")}]
-              {summary.missing_citations.length > 12 ? " and more" : ""}.
+              Citations that don't match the reference list:{" "}
+              {summary.missing_citations
+                .slice(0, 12)
+                .map((u) => (/^\d+$/.test(u) ? `[${u}]` : u))
+                .join("; ")}
+              {summary.missing_citations.length > 12 ? "; and more" : ""}.
             </li>
           )}
           {conversion.warnings.map((w) => (

@@ -127,21 +127,32 @@ def test_conversion_rejects_unsupported_and_corrupt(client):
     assert client.post("/api/runs", data={"mode": "heuristic"}).status_code == 422
 
 
-def test_reference_only_check_for_author_year_grey_literature(client):
+def test_author_year_check_with_grey_literature(client):
     md = ("# Heat networks briefing\n\nHeat networks could supply a fifth of UK heat by 2050 (CCC, 2023). "
           "Government set out its plan in 2023 (DESNZ, 2023).\n\n## References\n\n"
           "1. Climate Change Committee (2023). Progress in reducing emissions: 2023 Report to Parliament. "
           "London: CCC.\n"
           "2. DESNZ (2023). Powering up Britain. https://www.gov.uk/government/publications/powering-up-britain\n")
     info = client.post("/api/inspect", json={"markdown": md}).json()
-    assert info["references"] == 2 and info["claims"] == 0
+    assert info["citation_style"] == "author_year" and info["claims"] == 2
+    assert info["missing_citations"] == ["CCC, 2023: no matching reference"]
     run_id = upload(client, data=md.encode(), name="briefing.md").json()["run_id"]
     run = wait(client, run_id)
     assert run["status"] == "awaiting_human_signoff"
-    assert run["claims"] == [] and run["counts"]["pairs"] == 0
+    assert [c["cited_keys"] for c in run["claims"]] == [[], ["2"]]
+    assert run["unresolved_citations"] == ["CCC, 2023: no matching reference"]
     assert [e["verdict"] for e in run["existence"]] == ["unverifiable", "exists_unindexed"]
+
+
+def test_reference_only_check_when_text_cites_nothing(client):
+    md = ("# Briefing\n\nHeat networks are growing.\n\n## References\n\n"
+          "1. Climate Change Committee (2023). Progress in reducing emissions: 2023 Report to Parliament. "
+          "London: CCC.\n")
+    run_id = upload(client, data=md.encode(), name="plain.md").json()["run_id"]
+    run = wait(client, run_id)
+    assert run["claims"] == [] and run["counts"]["pairs"] == 0
     report = client.get(f"/api/runs/{run_id}/report").text
-    assert "only the reference list was checked" in report and "Exists, not indexed" in report
+    assert "only the reference list was checked" in report
 
 
 def test_unedited_preview_with_crlf_is_not_marked_edited(client):

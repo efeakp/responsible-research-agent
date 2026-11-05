@@ -58,7 +58,7 @@ table{border-collapse:collapse;width:100%;font-size:13.5px}td{padding:4px 8px 4p
 td:first-child{color:var(--sub);white-space:nowrap;width:170px}
 </style></head><body><main>
 <h1>Citation &amp; claim verification</h1>
-<div class="sub">{{ r.manuscript }} · run <code>{{ r.run_id }}</code> · {{ r.finished_at }} · checker: {{ method }}</div>
+<div class="sub">{{ r.manuscript }} · {{ {'author_year': 'author–year citations', 'numeric': 'numbered citations', 'none': 'no citations found'}.get(r.citation_style, '') }} · run <code>{{ r.run_id }}</code> · {{ r.finished_at }} · checker: {{ method }}</div>
 
 {% if signoffs %}{% set s = signoffs[-1] %}
 <div class="banner {{ 'ok' if s.decision=='approve' else 'bad' if s.decision=='reject' else 'warn' }}">
@@ -78,7 +78,8 @@ td:first-child{color:var(--sub);white-space:nowrap;width:170px}
 
 {% if r.unresolved_citations or (r.uncited_references and r.claims) %}
 <h2>Citation integrity</h2><div class="card">
-{% if r.unresolved_citations %}<div><span class="pill bad">Cited but not in reference list</span> [{{ r.unresolved_citations|join('], [') }}]</div>{% endif %}
+{% if r.unresolved_citations %}<div><span class="pill bad">Citations that don't match the reference list</span>
+<ul class="issues">{% for u in r.unresolved_citations %}<li>{% if u.isdigit() %}[{{ u }}]: no entry in the reference list{% else %}{{ u }}{% endif %}</li>{% endfor %}</ul></div>{% endif %}
 {% if r.uncited_references and r.claims %}<div style="margin-top:6px"><span class="pill muted">In reference list but never cited</span> [{{ r.uncited_references|join('], [') }}]</div>{% endif %}
 </div>{% endif %}
 
@@ -90,6 +91,9 @@ td:first-child{color:var(--sub);white-space:nowrap;width:170px}
 {% if e.issues %}<ul class="issues">{% for i in e.issues %}<li>{{ i }}</li>{% endfor %}</ul>{% endif %}
 {% if resolutions.get('R'+e.reference.key) %}{% set h = resolutions['R'+e.reference.key] %}<div class="human">Human: <b>{{ h.verdict }}</b> ({{ h.reviewer }}){% if h.note %} — {{ h.note }}{% endif %}</div>{% endif %}
 </div>{% endfor %}
+
+{% if dois %}<h2>DOIs found for references that don't give one</h2>
+<div class="card"><table>{% for d in dois %}<tr><td>[{{ d.key }}] {{ d.who }} ({{ d.year }})</td><td><code>https://doi.org/{{ d.doi }}</code>{% if d.check %} <span class="pill warn">details differ: check first</span>{% endif %}</td></tr>{% endfor %}</table></div>{% endif %}
 
 <h2>2 · Do the sources support the claims?</h2>
 {% if not r.claims %}<div class="card why">No numbered citations like [1] were found in the text, so only the reference list was checked.</div>{% endif %}
@@ -115,7 +119,7 @@ td:first-child{color:var(--sub);white-space:nowrap;width:170px}
 <h2>Known limitations</h2><div class="card why"><ul style="margin:0;padding-left:18px">
 <li>"Exists, not indexed" means a real DOI or a working link, but not a scholarly record. Check by hand that it is the cited document and says what is claimed.</li>
 <li>Claim support is judged against abstracts, not full text. A claim drawn from a paper's body may show as insufficient or unsupported.</li>
-<li>Numeric citation styles only ([1], [2,3], [4–6]). Author–year styles are not yet parsed.</li>
+<li>Numbered ([1], [2–4]) and author–year ((Smith, 2020), Smith et al. (2020)) citations are recognised. Footnote citations are not. Narrative citations are only counted when they match a reference.</li>
 <li>Title, author and year are parsed heuristically from reference lines; an unusual style can cause a false mismatch. Check the issue text before acting.</li>
 <li>A reference that verifies here exists and matches its metadata. That does not mean it is a good source.</li>
 </ul></div>
@@ -138,11 +142,15 @@ def render(run_dir: Path) -> Path:
         support_by_claim.setdefault(s.claim_id, []).append(s)
     titles = {e.reference.key: (e.record.title if e.record else None) for e in r.references}
     method = r.support[0].method if r.support else "n/a"
+    dois = [{"key": e.reference.key, "who": e.reference.first_author or "", "year": e.reference.year or "n.d.",
+             "doi": e.record.identifier, "check": e.verdict.value == "metadata_mismatch"}
+            for e in r.references
+            if not e.reference.doi and e.record and e.record.identifier.startswith("10.")]
     env = Environment(autoescape=select_autoescape(["html"]))
     html = env.from_string(TEMPLATE).render(
         r=r, labels=LABELS, ec=Counter({**{k: 0 for k in LABELS}, **Counter(e.verdict.value for e in r.references)}),
         sc=Counter({**{k: 0 for k in LABELS}, **Counter(s.verdict.value for s in r.support)}),
-        support_by_claim=support_by_claim, titles=titles, signoffs=signoffs,
+        support_by_claim=support_by_claim, titles=titles, dois=dois, signoffs=signoffs,
         resolutions=resolutions, chain_ok=chain_ok, chain_msg=chain_msg, method=method,
         n_events=len(events), n_http=sum(e["event"] == "http_get" for e in events),
         n_llm=sum(e["event"] == "llm_call" for e in events), run_dir=str(run_dir))

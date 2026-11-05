@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "responsible-research-agent"
-version = "0.3.1"
+version = "0.4.0"
 description = "Citation and claim verifier with a tamper-evident audit trail and human sign-off"
 requires-python = ">=3.10"
 dependencies = ["httpx>=0.27", "pydantic>=2.5", "jinja2>=3.1", "langgraph>=1.0", "langgraph-checkpoint-sqlite>=2.0", "fastapi>=0.110", "uvicorn>=0.29", "python-multipart>=0.0.9"]

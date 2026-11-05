@@ -332,12 +332,13 @@ def to_markdown(raw: str, extractor: str = "text") -> Conversion:
         conv.warnings.append(f"{demoted} superscript number(s) in the title and author block were treated as "
                              "affiliation markers, not citations.")
     body = _join_paragraphs(body_lines)
-    cites = re.findall(r"\[(\d[\d,\s\-–]*)\]", body)
-    if not cites:
-        conv.warnings.append("No numbered citations like [1] were found, so only the reference list can be "
-                             "checked. Author–year citations (Smith, 2020) aren't supported yet. Superscript "
-                             "numbers in PDFs are often lost in extraction; if the article uses them, try "
-                             "its Word or HTML version.")
+    from .parse import extract_claims, parse_references
+    found_refs = parse_references("\n".join(numbered))
+    if not extract_claims(body, found_refs):
+        conv.warnings.append("No citations were found in the text, either numbered like [1] or author–year "
+                             "like (Smith, 2020) matching the reference list, so only the reference list "
+                             "can be checked. Superscript numbers in PDFs are often lost in extraction; if "
+                             "the article uses them, try its Word or HTML version.")
     # sections after the reference list (appendix, acknowledgements…) go before it,
     # so the verifier doesn't mistake them for references
     if any(l.strip() for l in tail):
@@ -353,16 +354,18 @@ def convert_file(path: Path) -> Conversion:
 
 def inspect_markdown(md: str) -> dict:
     """What the verifier will see in this Markdown: used by the CLI, the API and the preview."""
-    from .parse import extract_claims, parse_references, split_manuscript
+    from .parse import citation_style, extract_claims, parse_references, split_manuscript, unresolved_citations
     body, ref_section = split_manuscript(md)
-    refs, claims = parse_references(ref_section), extract_claims(body)
+    refs = parse_references(ref_section)
+    claims = extract_claims(body, refs)
     keys = {r.key for r in refs}
     cited = {k for c in claims for k in c.cited_keys}
     return {
         "references": len(refs),
         "with_identifier": sum(1 for r in refs if r.doi or r.arxiv_id or r.pmid),
         "claims": len(claims),
-        "missing_citations": sorted(cited - keys, key=int),
+        "citation_style": citation_style(body, refs) if claims else "none",
+        "missing_citations": unresolved_citations(claims, refs),
         "uncited_references": sorted(keys - cited, key=int),
         "has_reference_heading": bool(ref_section.strip()) or bool(refs),
     }

@@ -110,13 +110,13 @@ class HeuristicChecker:
             return SupportResult(claim_id=claim.id, reference_key=key,
                                  verdict=SupportVerdict.INSUFFICIENT, method=self.method,
                                  rationale=no_text_reason(rec))
-        cw = {w for w in re.findall(r"[a-z]{3,}", _strip_citations(claim.text).lower())
+        cw = {w for w in re.findall(r"[a-z]{3,}", (claim.plain or _strip_citations(claim.text)).lower())
               if w not in STOPWORDS}
         sw = set(re.findall(r"[a-z]{3,}", rec.abstract.lower()))
         overlap = len(cw & sw) / len(cw) if cw else 0.0
         notes = [f"Content-word overlap with abstract: {overlap:.0%}. "
                  "Heuristic mode cannot confirm support; a person must check."]
-        notes += number_issues(claim.text, rec.abstract)
+        notes += number_issues(claim.plain or claim.text, rec.abstract)
         return SupportResult(claim_id=claim.id, reference_key=key,
                              verdict=SupportVerdict.NEEDS_REVIEW, method=self.method,
                              rationale=" ".join(notes))
@@ -193,7 +193,7 @@ class LLMChecker:
             return SupportResult(claim_id=claim.id, reference_key=key,
                                  verdict=SupportVerdict.INSUFFICIENT, method=self.method,
                                  rationale=no_text_reason(rec))
-        prompt = (f"<claim>\n{_strip_citations(claim.text).strip()}\n</claim>\n\n"
+        prompt = (f"<claim>\n{(claim.plain or _strip_citations(claim.text)).strip()}\n</claim>\n\n"
                   f"<source_text title=\"{rec.title or ''}\">\n{rec.abstract}\n</source_text>")
         try:
             raw = self._call(prompt)
@@ -211,7 +211,7 @@ class LLMChecker:
                 rationale = ("Model claimed support but its evidence quote is not in the source "
                              f"text, so the verdict was withheld. Model said: {rationale}")
                 verdict, quote = SupportVerdict.NEEDS_REVIEW, None
-        extra = number_issues(claim.text, rec.abstract)
+        extra = number_issues(claim.plain or claim.text, rec.abstract)
         if extra and verdict == SupportVerdict.SUPPORTED:
             verdict = SupportVerdict.PARTIAL
             rationale += " (Downgraded: claim contains numbers absent from the source text.)"

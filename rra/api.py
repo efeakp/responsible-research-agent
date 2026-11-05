@@ -320,6 +320,7 @@ def create_app(runs_dir: Path = Path("runs"), cache_dir: Path = Path(".rra_cache
                 "support": values.get("support", []),
                 "unresolved_citations": values.get("unresolved_citations", []),
                 "uncited_references": values.get("uncited_references", []),
+                "citation_style": values.get("citation_style"),
                 "pending": pending, "resolutions": resolutions, "signoffs": signoffs,
                 "verdict_options": sorted(VALID_RESOLUTIONS), "decisions": list(DECISIONS)}
 

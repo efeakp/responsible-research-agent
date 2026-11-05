@@ -34,7 +34,7 @@ from .existence import verify_reference
 from .http import CachedClient
 from .models import (Claim, ExistenceResult, ExistenceVerdict, Reference, RunReport,
                      SupportResult, SupportVerdict)
-from .parse import extract_claims, parse_references, split_manuscript
+from .parse import citation_style, extract_claims, parse_references, split_manuscript, unresolved_citations
 from .report import render
 from .support import (DEFAULT_MODEL, OLLAMA_HOST, SYSTEM_PROMPT, HeuristicChecker, LLMChecker,
                       ollama_model_info)
@@ -58,6 +58,7 @@ class State(TypedDict, total=False):
     support: list[dict]
     unresolved_citations: list[str]
     uncited_references: list[str]
+    citation_style: str
     review: Optional[dict]
     status: str
 
@@ -90,7 +91,8 @@ def _report(state: State) -> RunReport:
         claims=[Claim.model_validate(c) for c in state.get("claims", [])],
         support=[SupportResult.model_validate(s) for s in state.get("support", [])],
         unresolved_citations=state.get("unresolved_citations", []),
-        uncited_references=state.get("uncited_references", []))
+        uncited_references=state.get("uncited_references", []),
+        citation_style=state.get("citation_style", "numeric"))
 
 
 # ---------- nodes ----------
@@ -110,8 +112,10 @@ def parse_node(state: State, runtime: Runtime[Ctx]) -> dict:
               support_prompt_sha256=sha256_text(SYSTEM_PROMPT) if state["mode"] == "ollama" else None)
     body, ref_section = split_manuscript(text)
     refs = parse_references(ref_section)
-    claims = extract_claims(body)
-    audit.log("parsed", references=[r.model_dump(mode="json", exclude_none=True) for r in refs],
+    style = citation_style(body, refs)
+    claims = extract_claims(body, refs)
+    audit.log("parsed", citation_style=style,
+              references=[r.model_dump(mode="json", exclude_none=True) for r in refs],
               claims=[c.model_dump(mode="json") for c in claims])
     if not refs:
         audit.log("warning", message="No reference list found (expected a 'References' heading "
@@ -121,7 +125,8 @@ def parse_node(state: State, runtime: Runtime[Ctx]) -> dict:
     return {"manuscript_sha256": sha256_text(text),
             "references": [r.model_dump(mode="json") for r in refs],
             "claims": [c.model_dump(mode="json") for c in claims],
-            "unresolved_citations": sorted(cited - ref_keys, key=int),
+            "citation_style": style if claims else "none",
+            "unresolved_citations": unresolved_citations(claims, refs),
             "uncited_references": sorted(ref_keys - cited, key=int)}
 
 

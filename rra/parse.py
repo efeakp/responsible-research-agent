@@ -58,12 +58,54 @@ def _first_url(body: str) -> str | None:
     return None
 
 
+# where a title stops: access notes, and a publisher name run on without a full stop
+TITLE_STOP = re.compile(r"\s*,?\s*(?:Available\s+(?:at|from|online)|Retrieved\s+(?:from|on)|\[?Accessed|URL:?)\b.*$",
+                        re.IGNORECASE)
+PUBLISHER_TAIL = re.compile(
+    r"[\s.,]+(?:Routledge|SAGE|Sage|Springer(?:\s+Nature)?|Wiley(?:-Blackwell)?|Elsevier|Palgrave(?:\s+Macmillan)?|"
+    r"Pearson|McGraw[- ]Hill|Polity(?:\s+Press)?|Earthscan|Taylor\s*&\s*Francis|Edward\s+Elgar|MIT\s+Press|"
+    r"(?:[A-Z][\w]+\s+){1,3}University\s+Press)\.?$")
+
+
+def _clean_title(t: str) -> str:
+    t = t.strip().lstrip(",;: ").strip().strip('"“”')
+    t = TITLE_STOP.sub("", t)
+    t = PUBLISHER_TAIL.sub("", t)
+    return t.strip(" ,;:")
+
+
+VOL_ISS_PAGES = re.compile(
+    r"(?<![\d.])(?P<vol>\d{1,4})\s*\(\s*(?P<iss>[A-Za-z0-9\-–/]{1,9})\s*\)\s*[,:]?\s*(?:pp?\.\s*)?"
+    r"(?P<p1>[A-Za-z]?\d{1,7})(?:\s*[-–—]\s*(?P<p2>[A-Za-z]?\d{1,7}))?(?![\d.]*\d)")
+VOL_NO_PAGES = re.compile(
+    r"\bvol(?:ume)?\.?\s*(?P<vol>\d{1,4})(?:\s*,?\s*(?:no\.?|issue)\s*(?P<iss>\d{1,4}))?"
+    r"(?:\s*,?\s*pp?\.\s*(?P<p1>\d{1,7})(?:\s*[-–—]\s*(?P<p2>\d{1,7}))?)?", re.IGNORECASE)
+VOL_PAGES = re.compile(
+    r"(?<![\d.(])(?P<vol>\d{1,4})\s*[,:]\s*(?:pp?\.\s*)?(?P<p1>[A-Za-z]?\d{1,7})\s*[-–—]\s*(?P<p2>[A-Za-z]?\d{1,7})(?!\d)")
+VOL_SPACE_PAGES = re.compile(r"(?<=,\s)(?P<vol>\d{1,4})\s+(?P<p1>\d{1,7})\s*[-–—]\s*(?P<p2>\d{1,7})(?!\d)")
+
+
+def _volume_pages(body: str) -> dict:
+    """Volume, issue and pages from the part of the reference after the year."""
+    y = re.search(r"\(?\b(?:19|20)\d{2}[a-z]?\b\)?", body)
+    tail = body[y.end():] if y else body
+    tail = URL_RE.sub("", tail)
+    tail = re.sub(r"\bdoi:\s*\S+", "", tail, flags=re.IGNORECASE)
+    for rx in (VOL_NO_PAGES, VOL_ISS_PAGES, VOL_PAGES, VOL_SPACE_PAGES):
+        m = rx.search(tail)
+        if m:
+            g = m.groupdict()
+            return {"volume": g.get("vol"), "issue": g.get("iss"), "first_page": g.get("p1"),
+                    "last_page": g.get("p2")}
+    return {}
+
+
 def _guess_title(body: str) -> str | None:
     """Best-effort title guess: the segment after the year, up to the next full stop."""
     m = re.search(r"\((?:19|20)\d{2}[a-z]?\)\.?\s*(.+?)\.(?:\s|$)", body)
     if m:
-        t = m.group(1).strip().strip('"“”')
-        return t if len(t) > 10 else None
+        t = _clean_title(m.group(1))
+        return t if len(t) >= 6 else None
     # "Author. Title. Journal" fallback: second sentence-ish segment
     parts = [p.strip() for p in re.split(r"\.\s+", body) if p.strip()]
     if len(parts) >= 2 and len(parts[1]) > 10:
@@ -100,6 +142,7 @@ def parse_references(section: str) -> list[Reference]:
             url=_first_url(body),
             title=_guess_title(URL_RE.sub("", MD_LINK_RE.sub(r"\1", body))),
             first_author=_guess_first_author(body),
+            **_volume_pages(body),
             year=year,
         ))
     return refs
@@ -137,14 +180,54 @@ def split_sentences(text: str) -> list[str]:
     return restored
 
 
-def extract_claims(body: str) -> list[Claim]:
+def _numeric(sentence: str) -> list[str]:
+    keys: list[str] = []
+    for m in CITE_RE.finditer(sentence):
+        for k in _expand_keys(m.group(1)):
+            if k not in keys:
+                keys.append(k)
+    return keys
+
+
+def citation_style(body: str, refs: list[Reference] | None = None) -> str:
+    """'numeric' if the text cites [n] and those numbers mostly exist in the reference
+    list (or there is no list); 'author_year' if it doesn't but there is a reference list."""
+    cited = {k for s in split_sentences(body) for k in _numeric(s)}
+    keys = {r.key for r in refs or []}
+    if cited and (not keys or len(cited & keys) >= len(cited) / 2):
+        return "numeric"
+    return "author_year" if keys else "numeric"
+
+
+def extract_claims(body: str, refs: list[Reference] | None = None) -> list[Claim]:
+    """Sentences that cite something. Numeric [n] citations always; author–year
+    citations when the document uses them (needs the reference list to match)."""
+    from .citations import build_index, find_author_year, plain_text   # avoid an import cycle
+    style = citation_style(body, refs)
+    index = build_index(refs) if style == "author_year" else []
     claims: list[Claim] = []
     for s in split_sentences(body):
-        keys: list[str] = []
-        for m in CITE_RE.finditer(s):
-            for k in _expand_keys(m.group(1)):
-                if k not in keys:
-                    keys.append(k)
-        if keys:
-            claims.append(Claim(id=f"C{len(claims) + 1}", text=s, cited_keys=keys))
+        if style == "numeric":
+            keys = _numeric(s)
+            if keys:
+                plain = re.sub(r"\s*\[\d+(?:\s*[-–,]\s*\d+)*\]", "", s).strip()
+                claims.append(Claim(id=f"C{len(claims) + 1}", text=s, cited_keys=keys, plain=plain))
+        else:
+            found = find_author_year(s, index)
+            if found.keys or found.unresolved:
+                claims.append(Claim(id=f"C{len(claims) + 1}", text=s, cited_keys=found.keys,
+                                    unresolved=found.unresolved, plain=plain_text(s, found.spans)))
     return claims
+
+
+def unresolved_citations(claims: list[Claim], refs: list[Reference]) -> list[str]:
+    """Numeric keys with no reference entry, then author–year citations that matched no
+    single reference, in order of first appearance."""
+    keys = {r.key for r in refs}
+    numeric = sorted({k for c in claims for k in c.cited_keys} - keys, key=lambda k: int(k) if k.isdigit() else 0)
+    labels: list[str] = []
+    for c in claims:
+        for u in c.unresolved:
+            if u not in labels:
+                labels.append(u)
+    return numeric + labels
